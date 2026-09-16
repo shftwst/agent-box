@@ -67,6 +67,28 @@ if [ "$(id -u)" = "0" ] && [ "${HOST_UID}" != "0" ]; then
   mkdir -p "${HOST_HOME}"
   chown "${HOST_UID}:${HOST_GID}" "${HOST_HOME}" 2>/dev/null || true
 
+  # Docker creates a bind mount's missing parent directories as root, so the
+  # ~/.local/bin mount leaves ~/.local root-owned and the host user cannot make
+  # the siblings pip --user, uv tool install and npm --prefix write to
+  # (~/.local/lib, ~/.local/share). Chown each ancestor of every mount under
+  # ${HOST_HOME}, skipping ancestors that are themselves mounts so nothing is
+  # written back through to the host.
+  while read -r _mnt; do
+    _dir=$(dirname "$_mnt")
+    while [ "$_dir" != "${HOST_HOME}" ] && [ "$_dir" != "/" ]; do
+      mountpoint -q "$_dir" || chown "${HOST_UID}:${HOST_GID}" "$_dir" 2>/dev/null || true
+      _dir=$(dirname "$_dir")
+    done
+  done < <(awk -v home="${HOST_HOME}/" 'index($5, home) == 1 { print $5 }' /proc/self/mountinfo)
+
+  # The cage's own shared mounts can land root-owned as well, when Docker had to
+  # create the source directory. libcage creates both as the host user on the
+  # host, so a non-recursive chown only repairs the in-box view.
+  for _shared in "${HOST_HOME}/.cache" "${HOST_HOME}/.local/bin"; do
+    [ -d "$_shared" ] && [ "$(stat -c %u "$_shared")" = 0 ] \
+      && chown "${HOST_UID}:${HOST_GID}" "$_shared" 2>/dev/null || true
+  done
+
   # Fix ownership on the payload's state tree. The init-container flush and
   # Docker-created mount points leave root-owned entries that cause EACCES when
   # the harness tries to write sessions, config, etc.
