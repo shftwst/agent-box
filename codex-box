@@ -40,6 +40,7 @@ BOX_DOCKERFILE="${BOX_SRC_DIR}/Dockerfile.codex"
 BOX_STATE_DIR="${HOME}/.codex-box/state"
 BOX_STATE_MOUNT="${HOME}/.codex"
 BOX_ENV_PREFIX="CODEX_BOX"
+BOX_HERDR_AGENT="codex"
 BOX_FORWARD_VARS=(OPENAI_API_KEY)
 # The cage is the isolation boundary, so Codex runs with its own sandbox and
 # approval friction off (its analogue of claude's --dangerously-skip-permissions).

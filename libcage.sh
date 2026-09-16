@@ -22,6 +22,9 @@
 #                     appends the user's passthrough args to it)
 #   BOX_RUN_ARGS      optional array: payload-owned docker-run arguments, such
 #                     as a loopback-only published port for a browser UI
+#   BOX_HERDR_AGENT   optional: the Herdr agent kind this harness reports as
+#                     (claude, codex, pi, ...). Omit when Herdr has no kind for
+#                     the harness.
 #
 # A wrapper MAY define these hooks (all optional):
 #   box_parse_arg "$@"   handle a wrapper-specific flag. Set _CONSUMED to the
@@ -404,8 +407,23 @@ cage_build_images() {
 }
 
 # ---------------------------------------------------------------------------
+# Herdr agent hint. Herdr works out which harness owns a pane from the foreground
+# process's environment as it stood at exec time, so exporting here would be
+# invisible to it: re-exec once with the variable already in place, which also
+# puts it on `docker run` and everything below. Kinds are listed at
+# https://herdr.dev/docs/agents/.
+cage_herdr_hint() {
+  [[ -n "${BOX_HERDR_AGENT:-}" && -z "${HERDR_AGENT:-}" ]] || return 0
+  export HERDR_AGENT="$BOX_HERDR_AGENT"
+  if [[ -x "$0" ]]; then
+    exec "$0" "$@"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Main entry.
 cage_run() {
+  cage_herdr_hint "$@"
   cage_parse_args "$@"
   set -- "${_passthrough[@]+"${_passthrough[@]}"}"
 

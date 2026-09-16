@@ -38,6 +38,7 @@ BOX_DOCKERFILE="${BOX_SRC_DIR}/Dockerfile.pi"
 BOX_STATE_DIR="${HOME}/.pi-box/state"
 BOX_STATE_MOUNT="${HOME}/.pi/agent"
 BOX_ENV_PREFIX="PI_BOX"
+BOX_HERDR_AGENT="pi"
 
 # Pi supports many providers. Forward its documented API-key and cloud-provider
 # variables when present; PI_BOX_EXTRA_VARS remains available for custom ones.
