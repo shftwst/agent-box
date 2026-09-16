@@ -18,6 +18,9 @@
 #
 # codex-box-specific flags (consumed before codex sees them; position-free):
 #   --no-ssh / --upgrade / --engine <mode> / --name <name> / --name-file <path>
+#   --herdr   bridge the host Herdr socket in, so the harness can drive panes
+#             and start sibling agents ON THE HOST. Host isolation is off while
+#             it is used; see cage_setup_herdr in libcage.sh.
 # — identical to claude-box; see libcage.sh and the README.
 #
 # Installation:

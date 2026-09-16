@@ -74,6 +74,7 @@ _cage_check_update_bg() {
 # harness sees them); a literal -- ends cage parsing. Unknown args go to the
 # wrapper's box_parse_arg hook, then to the harness passthrough.
 NO_SSH=0
+HERDR_BRIDGE=0
 UPGRADE=0
 ENGINE_MODE=""
 BOX_NAME=""
@@ -84,6 +85,7 @@ cage_parse_args() {
     case "$1" in
       --) shift; _passthrough+=("$@"); break ;;
       --no-ssh) NO_SSH=1 ;;
+      --herdr) HERDR_BRIDGE=1 ;;
       --upgrade) UPGRADE=1 ;;
       --engine)
         shift; ENGINE_MODE="${1:-}"
@@ -235,27 +237,36 @@ cage_resolve_engine() {
 }
 
 # ---------------------------------------------------------------------------
-# SSH mounts + colima ssh-agent relay. Ported verbatim; appends to
-# override_mounts / env_args and sets _SSH_RELAY_PID.
-_SSH_RELAY_PID=""
-cage_setup_ssh() {
-  if [[ $NO_SSH -ne 0 ]]; then
-    log "ssh disabled (--no-ssh): no key mount, no agent forwarding"
-    return 0
-  fi
-  [[ -d "${HOME}/.ssh" ]] && override_mounts+=(-v "${HOME}/.ssh:${HOME}/.ssh:ro")
-  [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] || return 0
-  if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
-    local relay_port_file; relay_port_file=$(mktemp /tmp/claude-box-relay.XXXXXX)
-    python3 -c "
-import socket, sys, threading, signal, os
-src = '${SSH_AUTH_SOCK}'
+# Add the host-gateway alias once, however many relays below ask for it.
+_CAGE_HOST_GATEWAY=0
+cage_add_host_gateway() {
+  [[ $_CAGE_HOST_GATEWAY -eq 0 ]] || return 0
+  _CAGE_HOST_GATEWAY=1
+  env_args+=(--add-host "host.docker.internal:host-gateway")
+}
+
+# A colima box cannot reach a host unix socket: virtiofs carries files, not
+# sockets. Relay one onto a loopback TCP port the box dials through
+# host.docker.internal, and socat turns it back into a socket in there.
+# Sets _CAGE_RELAY_PORT, empty when the relay did not come up, and records the
+# relay pid for cage_cleanup. Deliberately not echoed: read through $(...) the
+# backgrounded relay would hold the substitution's pipe open and hang it, and
+# the pid would land in a subshell and never be killed. Its stdout goes nowhere
+# (it never writes any) so a backgrounded relay can never hold a caller's pipe
+# open; stderr is left attached so a failure is still visible.
+_CAGE_RELAY_PIDS=()
+_CAGE_RELAY_PORT=""
+cage_relay_unix_socket() {
+  local src="$1" port_file port="" i
+  port_file=$(mktemp /tmp/claude-box-relay.XXXXXX)
+  python3 -c '
+import socket, sys, threading, signal
+src, port_file = sys.argv[1], sys.argv[2]
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(('127.0.0.1', 0))
-port = server.getsockname()[1]
-with open('${relay_port_file}', 'w') as f:
-    f.write(str(port))
+server.bind(("127.0.0.1", 0))
+with open(port_file, "w") as f:
+    f.write(str(server.getsockname()[1]))
 server.listen(8)
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 def relay(a, b):
@@ -269,21 +280,33 @@ while True:
     u.connect(src)
     threading.Thread(target=relay, args=(c, u), daemon=True).start()
     threading.Thread(target=relay, args=(u, c), daemon=True).start()
-" &
-    _SSH_RELAY_PID=$!
-    local port="" i
-    for i in $(seq 1 30); do
-      [[ -s "$relay_port_file" ]] && { port=$(<"$relay_port_file"); break; }
-      sleep 0.1
-    done
-    rm -f "$relay_port_file"
+' "$src" "$port_file" >/dev/null &
+  _CAGE_RELAY_PIDS+=($!)
+  for i in $(seq 1 30); do
+    [[ -s "$port_file" ]] && { port=$(<"$port_file"); break; }
+    sleep 0.1
+  done
+  rm -f "$port_file"
+  _CAGE_RELAY_PORT="$port"
+}
+
+# ---------------------------------------------------------------------------
+# SSH mounts + colima ssh-agent relay. Appends to override_mounts / env_args.
+cage_setup_ssh() {
+  if [[ $NO_SSH -ne 0 ]]; then
+    log "ssh disabled (--no-ssh): no key mount, no agent forwarding"
+    return 0
+  fi
+  [[ -d "${HOME}/.ssh" ]] && override_mounts+=(-v "${HOME}/.ssh:${HOME}/.ssh:ro")
+  [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] || return 0
+  if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
+    cage_relay_unix_socket "$SSH_AUTH_SOCK"
+    local port="$_CAGE_RELAY_PORT"
     if [[ -z "$port" ]]; then
       warn "SSH agent relay failed to start: signing will not work"
-      kill "$_SSH_RELAY_PID" 2>/dev/null || true
-      _SSH_RELAY_PID=""
     else
       env_args+=(-e "CAGE_SSH_RELAY_PORT=${port}")
-      env_args+=(--add-host "host.docker.internal:host-gateway")
+      cage_add_host_gateway
     fi
   elif [[ "$SSH_AUTH_SOCK" == /private/tmp/com.apple.launchd.* ]]; then
     override_mounts+=(-v "/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock")
@@ -292,6 +315,61 @@ while True:
     override_mounts+=(-v "${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}")
     env_args+=(-e "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}")
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Herdr control bridge (opt-in: --herdr). Gives the box the host's Herdr socket
+# so an agent in here can split panes and start sibling agents out on the host.
+#
+# This is a deliberate hole in the cage, not an oversight. `herdr pane split`
+# and `herdr agent start` run commands on the host, so a harness holding this
+# socket can run host commands: the same access ADR-0041 decision 3 refuses for
+# the docker socket. It stays off unless asked for, and says so when used.
+cage_setup_herdr() {
+  [[ $HERDR_BRIDGE -eq 1 ]] || return 0
+
+  if [[ "${HERDR_ENV:-}" != "1" || -z "${HERDR_SOCKET_PATH:-}" ]]; then
+    warn "--herdr: this shell is not inside a Herdr pane; no bridge"
+    return 0
+  fi
+  if [[ ! -S "${HERDR_SOCKET_PATH}" ]]; then
+    warn "--herdr: ${HERDR_SOCKET_PATH} is not a socket; no bridge"
+    return 0
+  fi
+
+  local var
+  for var in HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID; do
+    [[ -n "${!var:-}" ]] && env_args+=(-e "${var}=${!var}")
+  done
+
+  if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
+    cage_relay_unix_socket "$HERDR_SOCKET_PATH"
+    local port="$_CAGE_RELAY_PORT"
+    if [[ -z "$port" ]]; then
+      warn "--herdr: socket relay failed to start; no bridge"
+      return 0
+    fi
+    env_args+=(-e "CAGE_HERDR_RELAY_PORT=${port}")
+    cage_add_host_gateway
+  else
+    override_mounts+=(-v "${HERDR_SOCKET_PATH}:/run/herdr/herdr.sock")
+    env_args+=(-e "HERDR_SOCKET_PATH=/run/herdr/herdr.sock")
+  fi
+
+  # A pane the box opens runs on the HOST, so anything it is told to execute
+  # must be a host path. `herdr agent start --kind <kind>` looks for an
+  # executable named after the kind, so leave one in ~/.local/bin, which is
+  # bind-mounted at its host path and so reads the same from either side.
+  local shim_dir="${HOME}/.local/bin/.cage-herdr-shims"
+  if [[ -n "${BOX_HERDR_AGENT:-}" ]] && mkdir -p "$shim_dir" 2>/dev/null; then
+    printf '#!/usr/bin/env bash\nHERDR_AGENT=%s exec %q "$@"\n' \
+      "$BOX_HERDR_AGENT" "${BOX_SRC_DIR}/${BOX_LABEL}" > "${shim_dir}/${BOX_HERDR_AGENT}"
+    chmod 755 "${shim_dir}/${BOX_HERDR_AGENT}"
+    env_args+=(-e "CAGE_HOST_SHIM_DIR=${shim_dir}")
+  fi
+  env_args+=(-e "CAGE_HOST_LAUNCHER=${BOX_SRC_DIR}/${BOX_LABEL}")
+
+  warn "--herdr: the box can run host commands through Herdr for this run"
 }
 
 # ---------------------------------------------------------------------------
@@ -351,10 +429,11 @@ cage_sync_back() {
 }
 
 cage_cleanup() {
-  if [[ -n "$_SSH_RELAY_PID" ]]; then
-    kill "$_SSH_RELAY_PID" 2>/dev/null || true
-    wait "$_SSH_RELAY_PID" 2>/dev/null || true
-  fi
+  local pid
+  for pid in "${_CAGE_RELAY_PIDS[@]+"${_CAGE_RELAY_PIDS[@]}"}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   [[ -n "$NAME_FILE" ]] && rm -f "$NAME_FILE"
 }
 
@@ -531,6 +610,7 @@ cage_run() {
 
   override_mounts=()
   cage_setup_ssh
+  cage_setup_herdr
   cage_stage_gitconfig
 
   # Share XDG cache and ~/.local/bin across boxes (generic).

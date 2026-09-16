@@ -16,6 +16,9 @@
 #   --port <1024-65535>         host Web UI port (default: 3080)
 # plus the cage-generic flags (see libcage.sh / README):
 #   --no-ssh / --upgrade / --engine <mode> / --name <name> / --name-file <path>
+#   --herdr   bridge the host Herdr socket in, so the harness can drive panes
+#             and start sibling agents ON THE HOST. Host isolation is off while
+#             it is used; see cage_setup_herdr in libcage.sh.
 #
 # Installation:
 #   ln -sf ~/claude-box/deepseek-box /usr/local/bin/deepseek-box

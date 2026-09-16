@@ -27,6 +27,9 @@
 #                                 OLLAMA_HOST)
 # plus the cage-generic flags (see libcage.sh / README):
 #   --no-ssh / --upgrade / --engine <mode> / --name <name> / --name-file <path>
+#   --herdr   bridge the host Herdr socket in, so the harness can drive panes
+#             and start sibling agents ON THE HOST. Host isolation is off while
+#             it is used; see cage_setup_herdr in libcage.sh.
 #
 # Installation:
 #   git clone https://github.com/shftwst/claude-box ~/claude-box

@@ -15,6 +15,7 @@
 #                                to the host user (e.g. ~/.claude, ~/.codex)
 #   CAGE_ENGINE                  rootless | rootful | none
 #   CAGE_SSH_RELAY_PORT          colima TCP->unix ssh-agent relay port (optional)
+#   CAGE_HERDR_RELAY_PORT        colima TCP->unix herdr socket relay port (optional)
 #   CAGE_DEBUG                   opt-in state dump (optional)
 
 set -e
@@ -186,6 +187,20 @@ if [ "$(id -u)" = "0" ] && [ "${HOST_UID}" != "0" ]; then
       UNIX-LISTEN:"${CONTAINER_SSH_SOCK}",fork,mode=600 \
       TCP:host.docker.internal:"${CAGE_SSH_RELAY_PORT}" &
     export SSH_AUTH_SOCK="$CONTAINER_SSH_SOCK"
+    sleep 0.2
+  fi
+
+  # Herdr control socket, same shape as the ssh relay above: socat turns the
+  # forwarded TCP port back into a unix socket the herdr CLI can dial. Only
+  # present when the launcher was given --herdr (see cage_setup_herdr).
+  if [ -n "${CAGE_HERDR_RELAY_PORT:-}" ]; then
+    echo "[cage] wiring herdr relay..." >&2
+    CONTAINER_HERDR_SOCK="/tmp/herdr.sock"
+    rm -f "$CONTAINER_HERDR_SOCK"
+    gosu "${USERNAME}" socat \
+      UNIX-LISTEN:"${CONTAINER_HERDR_SOCK}",fork,mode=600 \
+      TCP:host.docker.internal:"${CAGE_HERDR_RELAY_PORT}" &
+    export HERDR_SOCKET_PATH="$CONTAINER_HERDR_SOCK"
     sleep 0.2
   fi
 

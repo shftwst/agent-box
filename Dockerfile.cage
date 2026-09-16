@@ -55,6 +55,12 @@ RUN case "$(dpkg --print-architecture)" in \
 # install prefix so the binary lands on the system PATH.
 RUN curl -fsSL https://fly.io/install.sh | FLYCTL_INSTALL=/usr/local sh
 
+# herdr — terminal workspace manager for coding agents. Only reachable when the
+# launcher is given --herdr, but the client is generic, so it lives in the cage.
+# The installer resolves linux/x86_64 and linux/aarch64; client and server builds
+# are negotiated at connect time and do not need to match.
+RUN curl -fsSL https://herdr.dev/install.sh | HERDR_INSTALL_DIR=/usr/local/bin sh
+
 # Netlify CLI + Wrangler (Cloudflare) — npm globals
 RUN npm install -g netlify-cli wrangler \
     && npm cache clean --force
