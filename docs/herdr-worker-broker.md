@@ -10,9 +10,11 @@ An agent inside a box cannot drive Herdr. The Herdr socket is local to the host,
 virtiofs carries files, not sockets, so a colima box cannot reach it at all.
 
 The obvious fix is to relay the socket in. That works, and it is built and tested on
-`feat/herdr-control-bridge`, but it hands the box `herdr pane split` and
-`herdr agent start`, both of which run commands on the host. A box that can run host
-commands is not a cage. It is the same access ADR-0041 decision 3 refuses for the
+`feat/herdr-control-bridge`, but it hands the box the whole Herdr CLI, and two of those
+commands together are arbitrary host execution: `herdr pane split` opens a pane running
+a shell, and `herdr pane send-text <pane> "<anything>"` types into it. `pane split --env`
+and `agent start -- <args>` are further routes to the same place. A box that can run
+host commands is not a cage. It is the same access ADR-0041 decision 3 refuses for the
 docker socket, and `entrypoint-cage.sh` still treats a mounted docker socket as fatal.
 Shipping the bridge as the answer would mean the cage refuses one root-equivalent hole
 at startup while offering an equivalent one behind a flag.
@@ -79,9 +81,10 @@ steps.
 3. Every verb resolves a name through the broker's own registry. A pane id from the box
    is refused, and a name the broker did not create is refused. Without this the box can
    prompt or read the operator's own pane.
-4. Never proxied at all: `pane run`, `pane split --env` with box-supplied values,
-   `agent start -- <passthrough>`, `agent send-keys`, `agent attach --takeover`.
-   `send-keys` is excluded because it types into a pane, and a pane can hold a shell.
+4. Never proxied at all: `pane send-text`, `pane send-keys`, `agent send-keys`,
+   `pane split` with box-supplied `--env` or `--cwd`, `agent start -- <passthrough>`,
+   `agent attach --takeover`. The send verbs are excluded because typing into a pane
+   that holds a shell is the same as running a command in it.
 5. `cwd` is fixed by the broker to the project it was started for. The box does not
    choose where a worker runs.
 6. Caps, refused past the limit rather than queued: worker count, prompt bytes, and
