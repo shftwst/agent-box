@@ -19,6 +19,18 @@ docker socket, and `entrypoint-cage.sh` still treats a mounted docker socket as 
 Shipping the bridge as the answer would mean the cage refuses one root-equivalent hole
 at startup while offering an equivalent one behind a flag.
 
+With the bridge there is nothing between the agent and the server:
+
+```
+   THE BOX                                        |   THE HOST
+  +----------------------+                        |  +------------------+
+  | orchestrator agent   |   full Herdr CLI       |  |   Herdr server   |
+  | permissions off      |------------------------|->|                  |
+  | + herdr binary       |   pane split, then     |  |  opens a shell,  |
+  | + HERDR_* variables  |   pane send-text       |  |  types into it   |
+  +----------------------+                        |  +------------------+
+```
+
 The delegation surface Herdr actually needs is much smaller than the socket:
 
 ```
@@ -39,16 +51,45 @@ A small program on the host that holds the Herdr socket and exposes a fixed set 
 verbs to the box. The box gets a client on its PATH and never sees Herdr.
 
 ```
-box (caged)                          host
-┌──────────────┐  spawn NAME         ┌────────────────────────────┐
-│ orchestrator │────────────────────►│ broker: holds the socket,  │
-│              │  ask NAME "text"    │ owns the pane registry,    │
-│              │◄────────────────────│ composes every command     │
-└──────────────┘  reply / status     └─────────────┬──────────────┘
-                                                   │ agent start/prompt/wait/read
-                                                   ▼
-                                      worker pane = codex-box (also caged)
+   THE BOX  (caged, Linux container in the colima VM)  |  THE HOST  (your Mac)
+  -----------------------------------------------------|------------------------------
+                                                       |
+   +----------------------+                            |  +-----------------------+
+   | orchestrator agent   |                            |  |        BROKER         |
+   | permissions off      |     (2) JSON lines         |  | holds the socket      |
+   |                      |----------------------------|->| owns the pane registry|
+   |  +----------------+  |                            |  | composes every command|
+   |  | cbw client     |  |<---- responses only -------|--|                       |
+   |  +----------------+  |                            |  +-----------+-----------+
+   +----------------------+                            |              | (1) unix socket
+                                                       |              v
+    x no herdr binary in the image                     |  +-----------------------+
+    x no HERDR_* variables forwarded                   |  |     Herdr server      |
+    x no Herdr socket reachable                        |  |     TUI + panes       |
+                                                       |  +-----------+-----------+
+                                                       |              | (3) starts
+   +----------------------+                            |              v
+   |  worker box (caged)  |<---------------------------|--- new pane runs codex-box
+   +----------+-----------+                            |
+              +--------- (4) project dir, virtiofs, shared both ways --------------
 ```
+
+The broker sits on the Mac, between the box and Herdr. It is an ordinary host program,
+not a container and not part of Herdr, and it is the only thing here that talks to Herdr.
+
+| Hop | Transport | Who dials | What crosses |
+|---|---|---|---|
+| (1) broker to Herdr | unix socket, macOS-local (`~/.config/herdr/herdr.sock`) | broker | the full Herdr CLI, composed by the broker alone |
+| (2) box to broker | unix socket on the host, relayed onto loopback TCP, socat back to a unix socket in the box | the box | one JSON object per line, each way |
+| (3) Herdr to worker | Herdr starts the pane itself | Herdr | the box wrapper, never a raw harness |
+| (4) box to worker | virtiofs project mount, already present | either side | files |
+
+Hop (2) is a chain because a container cannot reach a macOS unix socket: virtiofs carries
+files, not sockets. `cage_relay_unix_socket` already does exactly this for the ssh agent.
+
+The box is always the client and never a server. Nothing on the host can open a
+connection into it, and a reply only travels back down a connection the box opened.
+Workers report through files on hop (4), not by connecting to the orchestrator.
 
 ## The verbs
 
@@ -68,6 +109,27 @@ piece of that branch worth keeping. One JSON object per line in each direction, 
 session can be logged and read back later.
 
 ## Refusal rules
+
+Two separate barriers do two different jobs.
+
+```
+  BARRIER 1: the container wall            BARRIER 2: the protocol
+  -----------------------------            -----------------------
+  stops the box reaching Herdr at all      stops the box choosing what runs
+
+   x no herdr binary in the image           x no argv field exists in any verb
+   x no HERDR_* variables forwarded         x pane ids refused, names only
+   x Herdr's socket never relayed           x names must be in the broker's registry
+                                            x send-text / send-keys never proxied
+   the box cannot form the thought          x --env and --cwd fixed by the broker
+                                            x agent start passthrough never accepted
+
+                                            the box can form the thought,
+                                            the broker will not carry it
+```
+
+A request carrying a command is not stripped or sanitised, it is unrepresentable: the
+protocol has no field it could travel in. Filters get bypassed, absent fields do not.
 
 These are the spec. Without all of them the broker is just the socket bridge with extra
 steps.
