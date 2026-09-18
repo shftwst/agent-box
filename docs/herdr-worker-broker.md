@@ -91,6 +91,62 @@ The box is always the client and never a server. Nothing on the host can open a
 connection into it, and a reply only travels back down a connection the box opened.
 Workers report through files on hop (4), not by connecting to the orchestrator.
 
+## How it starts
+
+The box wrapper starts it, as a background child on the host, in the same place and the
+same shape as the ssh-agent relay it sits beside. There is no daemon and nothing to
+install running.
+
+```
+you, in a Herdr pane
+  |
+  |  codex-box --workers
+  v
+wrapper (host process, inherits HERDR_ENV / HERDR_PANE_ID / HERDR_SOCKET_PATH
+  |                             from the pane it was typed in)
+  |  1. refuse the flag if HERDR_ENV is not 1: warn, carry on without workers
+  |  2. start the broker as a background child, handing it the orchestrator
+  |     pane id, the project dir and the harness kind
+  |  3. wait, bounded, for the broker's socket to appear
+  |     on timeout: warn, carry on without workers
+  |  4. relay THAT socket into the box, never Herdr's
+  v
+docker run
+  |
+  v
+box starts, client finds the socket at the path the wrapper passed in
+```
+
+On exit the existing cleanup trap kills the broker alongside the other relays, and the
+broker closes the panes it opened.
+
+The property that matters is the ordering. Everything the broker will ever need was
+fixed on the host before the box existed:
+
+| Settled at startup, by the host | Never accepted from the box, at any point |
+|---|---|
+| orchestrator pane id (the registry key) | any pane id |
+| project dir, used as every worker's cwd | any path |
+| harness kind, and so the wrapper workers run | any command, argv or kind |
+| worker count, prompt size and timeout caps | any override of them |
+
+The box cannot supply these because it was not running when they were decided. That is a
+stronger position than validating them on arrival.
+
+Other startup rules:
+
+- One broker per box, and one box per orchestrator pane. A second box launched in the
+  same pane is refused rather than given a second registry over the same dock.
+- The socket is per pane, `~/.<box>-box/brokers/<pane-id>.sock`, mode 600, so two boxes
+  in two panes never collide.
+- A broker that cannot start is a warning, not a failed launch. The box comes up without
+  worker support, matching how a failed ssh relay behaves today.
+- Implementation is one python3 file, standard library only, running as you with no
+  elevation. python3 is already on the host launcher path, since the relay uses it.
+
+Without the flag, none of this happens: no broker, no socket, no relay. Launching
+workers from the host pane by hand stays available and unchanged.
+
 ## The verbs
 
 | Box asks | Broker runs | Returns |
