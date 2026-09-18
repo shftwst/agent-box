@@ -95,7 +95,7 @@ Workers report through files on hop (4), not by connecting to the orchestrator.
 
 | Box asks | Broker runs | Returns |
 |---|---|---|
-| `spawn <name>` | `pane split` against the registry's dock tail, then `agent start <name> --kind <kind> --pane <new>` | pane id, or a refusal |
+| `spawn <name> [kind]` | `pane split` against the registry's dock tail, then `agent start <name> --kind <kind> --pane <new>` | pane id and kind, or a refusal |
 | `ask <name> <text>` | `agent prompt <pane> <text> --wait --until idle --timeout <cap>` | final status |
 | `read <name> [lines]` | `agent read <pane> --lines <n>` | pane text |
 | `poll <name>` | `agent get <pane>` | status only |
@@ -169,9 +169,17 @@ reset, rather than splitting something that now belongs to someone else.
 
 ## What the box gets
 
-A client named for the job, on PATH in the image, speaking the line protocol. Nothing
-Herdr-shaped is installed in the box and no `HERDR_*` variable is forwarded, so an agent
-in the box cannot mistake itself for a Herdr-managed process.
+`box-worker`, on PATH in the image, speaking the line protocol and printing the reply as
+JSON:
+
+```
+box-worker spawn <name>              box-worker poll  <name>
+box-worker ask   <name> <text>       box-worker close <name>
+box-worker read  <name> [--lines N]  box-worker list
+```
+
+Nothing Herdr-shaped is installed in the box and no `HERDR_*` variable is forwarded, so
+an agent in the box cannot mistake itself for a Herdr-managed process.
 
 ## A reduction worth taking first
 

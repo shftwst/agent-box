@@ -74,8 +74,14 @@ RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/1.17/gosu-$(dpk
     && chmod +x /usr/local/bin/gosu \
     && gosu nobody true
 
+# box-worker: the in-box client for the host worker broker. The broker holds the
+# Herdr socket out on the host, so no herdr client is installed here and no
+# HERDR_* variable is forwarded in. See docs/herdr-worker-broker.md.
+COPY box-worker /usr/local/bin/box-worker
+
 COPY entrypoint-cage.sh /usr/local/bin/cage-entrypoint.sh
 COPY userns-probe.sh /usr/local/bin/claude-box-userns-probe
-RUN chmod +x /usr/local/bin/cage-entrypoint.sh /usr/local/bin/claude-box-userns-probe
+RUN chmod +x /usr/local/bin/cage-entrypoint.sh /usr/local/bin/claude-box-userns-probe \
+    /usr/local/bin/box-worker
 
 ENTRYPOINT ["/usr/local/bin/cage-entrypoint.sh"]

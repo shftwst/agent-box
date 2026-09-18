@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Host-side Herdr worker broker. See docs/herdr-worker-broker.md.
+
+Holds the Herdr socket so the box never has to. The box gets a line protocol
+with six verbs and no field anywhere that a command could travel in: this
+process composes every Herdr command line itself, from values fixed on the
+host before the box existed.
+
+Two rules keep that true. Remove either and this is a plain socket relay again:
+
+  * every subprocess call passes a list argv and never a shell string, so a
+    worker name cannot become a command however it is spelled;
+  * every verb resolves a name through this process's own registry, so a pane
+    it did not create cannot be named at all.
+
+The one value the box may choose beyond a worker name is the agent kind, and
+only from the --allow list the host fixed at startup.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+ORCHESTRATOR_RATIO = 0.65
+WORKER_RATIO = 0.5
+
+
+class Refused(Exception):
+    pass
+
+
+class Broker:
+    def __init__(self, opts, shim_dir):
+        self.opts = opts
+        self.shim_dir = shim_dir
+        self.workers = {}
+        self.dock_tail = None
+        self.lock = threading.Lock()
+
+    # -- Herdr ------------------------------------------------------------
+    def _herdr(self, *args):
+        result = subprocess.run(
+            [self.opts.herdr_bin, *args],
+            capture_output=True,
+            text=True,
+            timeout=self.opts.timeout_cap / 1000 + 30,
+        )
+        if result.returncode != 0:
+            raise Refused(f"herdr {args[0]} {args[1]} failed: {result.stderr.strip()[:200]}")
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {"raw": result.stdout}
+
+    def _pane_of(self, name):
+        if name not in self.workers:
+            raise Refused(f"no worker named {name!r}")
+        return self.workers[name]
+
+    # -- verbs ------------------------------------------------------------
+    def spawn(self, req):
+        name = req.get("name", "")
+        if not isinstance(name, str) or not NAME.match(name):
+            raise Refused("name must match [a-z][a-z0-9_-]{0,31}")
+        if name in self.workers:
+            raise Refused(f"{name} already exists")
+        if len(self.workers) >= self.opts.max_workers:
+            raise Refused(f"worker limit reached ({self.opts.max_workers})")
+
+        kind = req.get("kind") or next(iter(self.opts.allowed))
+        if kind not in self.opts.allowed:
+            raise Refused(f"kind {kind!r} not permitted (allowed: {', '.join(self.opts.allowed)})")
+
+        if self.dock_tail is None:
+            split = self._herdr(
+                "pane", "split", "--pane", self.opts.pane,
+                "--direction", "right", "--ratio", str(ORCHESTRATOR_RATIO),
+                "--cwd", self.opts.project,
+                "--env", f"PATH={self.shim_dir}:{os.environ['PATH']}",
+                "--no-focus",
+            )
+        else:
+            split = self._herdr(
+                "pane", "split", "--pane", self.dock_tail,
+                "--direction", "down", "--ratio", str(WORKER_RATIO),
+                "--cwd", self.opts.project,
+                "--env", f"PATH={self.shim_dir}:{os.environ['PATH']}",
+                "--no-focus",
+            )
+
+        pane = split.get("result", {}).get("pane", {}).get("pane_id")
+        if not pane:
+            raise Refused("herdr pane split returned no pane id")
+
+        try:
+            self._herdr(
+                "agent", "start", name,
+                "--kind", kind,
+                "--pane", pane,
+                "--timeout", str(self.opts.start_timeout),
+            )
+        except Refused:
+            self._herdr("pane", "close", pane)
+            raise
+
+        self.workers[name] = pane
+        self.dock_tail = pane
+        return {"name": name, "pane": pane, "kind": kind}
+
+    def ask(self, req):
+        pane = self._pane_of(req.get("name", ""))
+        text = req.get("text", "")
+        if not isinstance(text, str) or not text:
+            raise Refused("text is required")
+        if len(text.encode()) > self.opts.max_prompt:
+            raise Refused(f"prompt over {self.opts.max_prompt} bytes")
+        timeout = min(int(req.get("timeout", self.opts.timeout_cap)), self.opts.timeout_cap)
+        reply = self._herdr(
+            "agent", "prompt", pane, text,
+            "--wait", "--until", "idle", "--timeout", str(timeout),
+        )
+        return {"status": reply.get("result", reply)}
+
+    def read(self, req):
+        pane = self._pane_of(req.get("name", ""))
+        lines = min(int(req.get("lines", 200)), self.opts.max_lines)
+        reply = self._herdr("agent", "read", pane, "--lines", str(lines))
+        return {"text": reply.get("result", reply)}
+
+    def poll(self, req):
+        pane = self._pane_of(req.get("name", ""))
+        return {"status": self._herdr("agent", "get", pane).get("result", {})}
+
+    def close(self, req):
+        name = req.get("name", "")
+        pane = self._pane_of(name)
+        self._herdr("pane", "close", pane)
+        del self.workers[name]
+        if self.dock_tail == pane:
+            self.dock_tail = next(reversed(list(self.workers.values())), None)
+        return {"closed": name}
+
+    def list(self, _req):
+        return {"workers": [{"name": n, "pane": p} for n, p in self.workers.items()]}
+
+    VERBS = {"spawn": spawn, "ask": ask, "read": read, "poll": poll, "close": close, "list": list}
+
+    def handle(self, line):
+        try:
+            req = json.loads(line)
+            if not isinstance(req, dict):
+                raise Refused("request must be an object")
+            verb = req.get("verb")
+            if verb not in self.VERBS:
+                raise Refused(f"unknown verb {verb!r}")
+            with self.lock:
+                return {"ok": True, **self.VERBS[verb](self, req)}
+        except Refused as exc:
+            return {"ok": False, "error": str(exc)}
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            return {"ok": False, "error": f"bad request: {exc}"}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "herdr call timed out"}
+
+    def shutdown(self):
+        for pane in self.workers.values():
+            try:
+                self._herdr("pane", "close", pane)
+            except Exception:
+                pass
+
+
+def log(path, message):
+    with open(path, "a") as handle:
+        handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+
+
+SUN_PATH_MAX = 100
+
+
+def serve(broker, sock_path, log_path):
+    if len(sock_path.encode()) > SUN_PATH_MAX:
+        sys.exit(
+            f"herdr-worker-broker: socket path is {len(sock_path)} bytes, over the "
+            f"{SUN_PATH_MAX} a unix socket allows: {sock_path}"
+        )
+    os.makedirs(os.path.dirname(sock_path), exist_ok=True)
+    if os.path.exists(sock_path):
+        os.unlink(sock_path)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(sock_path)
+    os.chmod(sock_path, 0o600)
+    server.listen(8)
+    log(log_path, f"listening on {sock_path} for pane {broker.opts.pane}")
+
+    while True:
+        conn, _ = server.accept()
+        threading.Thread(target=session, args=(broker, conn, log_path), daemon=True).start()
+
+
+def session(broker, conn, log_path):
+    with conn, conn.makefile("rw") as stream:
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            reply = broker.handle(line)
+            log(log_path, ("ACCEPT " if reply.get("ok") else "REFUSE ") + line[:300])
+            stream.write(json.dumps(reply) + "\n")
+            stream.flush()
+
+
+def write_shim(shim_dir, kind, launcher):
+    path = os.path.join(shim_dir, kind)
+    with open(path, "w") as handle:
+        handle.write(
+            "#!/usr/bin/env bash\n"
+            f"HERDR_AGENT={kind} exec {launcher} \"$@\"\n"
+        )
+    os.chmod(path, 0o755)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pane", required=True, help="orchestrator pane id, the registry key")
+    parser.add_argument("--project", required=True, help="cwd every worker is given")
+    parser.add_argument("--allow", required=True, action="append", metavar="KIND=LAUNCHER",
+                        help="permitted agent kind and the host wrapper it runs, repeatable. "
+                             "The first is the default. A kind not named here cannot be spawned.")
+    parser.add_argument("--socket", required=True)
+    parser.add_argument("--log", required=True)
+    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--max-prompt", type=int, default=8192)
+    parser.add_argument("--max-lines", type=int, default=2000)
+    parser.add_argument("--timeout-cap", type=int, default=600000)
+    parser.add_argument("--start-timeout", type=int, default=120000)
+    parser.add_argument("--herdr-bin", default=os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr"))
+    opts = parser.parse_args()
+
+    if os.environ.get("HERDR_ENV") != "1":
+        sys.exit("herdr-worker-broker: not inside a Herdr pane")
+    if not opts.herdr_bin:
+        sys.exit("herdr-worker-broker: no herdr binary on PATH")
+    if not os.path.isdir(opts.project):
+        sys.exit(f"herdr-worker-broker: no such project dir: {opts.project}")
+
+    opts.allowed = {}
+    for entry in opts.allow:
+        kind, _, launcher = entry.partition("=")
+        if not kind or not os.access(launcher, os.X_OK):
+            sys.exit(f"herdr-worker-broker: bad --allow {entry!r}")
+        opts.allowed[kind] = launcher
+
+    shim_dir = tempfile.mkdtemp(prefix="herdr-worker-shim.")
+    for kind, launcher in opts.allowed.items():
+        write_shim(shim_dir, kind, launcher)
+    broker = Broker(opts, shim_dir)
+
+    try:
+        serve(broker, opts.socket, opts.log)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        broker.shutdown()
+        shutil.rmtree(shim_dir, ignore_errors=True)
+        if os.path.exists(opts.socket):
+            os.unlink(opts.socket)
+
+
+if __name__ == "__main__":
+    main()

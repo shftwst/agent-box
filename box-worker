@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""In-box client for the host worker broker. See docs/herdr-worker-broker.md.
+
+Speaks the line protocol to CAGE_WORKER_SOCKET and prints the reply as JSON.
+Knows nothing about Herdr, holds no socket to it, and has no way to express a
+command: the broker on the host decides what every worker runs.
+"""
+
+import json
+import os
+import socket
+import sys
+
+USAGE = """usage:
+  box-worker spawn <name>
+  box-worker ask   <name> <text> [--timeout MS]
+  box-worker read  <name> [--lines N]
+  box-worker poll  <name>
+  box-worker close <name>
+  box-worker list
+
+names match [a-z][a-z0-9_-]{0,31} and refer only to workers this box created."""
+
+
+def call(request):
+    path = os.environ.get("CAGE_WORKER_SOCKET")
+    if not path:
+        sys.exit("box-worker: no worker broker in this box (launch it with --workers)")
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        conn.connect(path)
+    except OSError as exc:
+        sys.exit(f"box-worker: cannot reach the broker at {path}: {exc}")
+    with conn, conn.makefile("rw") as stream:
+        stream.write(json.dumps(request) + "\n")
+        stream.flush()
+        reply = stream.readline()
+    if not reply:
+        sys.exit("box-worker: broker closed the connection")
+    return json.loads(reply)
+
+
+def parse(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(USAGE)
+        sys.exit(0)
+
+    verb, rest = argv[0], argv[1:]
+    if verb == "list":
+        return {"verb": "list"}
+    if not rest:
+        sys.exit(f"box-worker: {verb} needs a worker name\n\n{USAGE}")
+
+    request = {"verb": verb, "name": rest[0]}
+    rest = rest[1:]
+
+    if verb == "ask":
+        text = [a for a in rest if not a.startswith("--")]
+        if not text:
+            sys.exit("box-worker: ask needs some text")
+        request["text"] = " ".join(text)
+        if "--timeout" in rest:
+            request["timeout"] = int(rest[rest.index("--timeout") + 1])
+    elif verb == "read" and "--lines" in rest:
+        request["lines"] = int(rest[rest.index("--lines") + 1])
+    elif verb not in ("spawn", "poll", "close"):
+        sys.exit(f"box-worker: unknown verb {verb!r}\n\n{USAGE}")
+
+    return request
+
+
+def main():
+    reply = call(parse(sys.argv[1:]))
+    print(json.dumps(reply, indent=2))
+    sys.exit(0 if reply.get("ok") else 1)
+
+
+if __name__ == "__main__":
+    main()

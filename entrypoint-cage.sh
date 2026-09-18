@@ -15,6 +15,7 @@
 #                                to the host user (e.g. ~/.claude, ~/.codex)
 #   CAGE_ENGINE                  rootless | rootful | none
 #   CAGE_SSH_RELAY_PORT          colima TCP->unix ssh-agent relay port (optional)
+#   CAGE_WORKER_RELAY_PORT       colima TCP->unix worker broker relay port (optional)
 #   CAGE_DEBUG                   opt-in state dump (optional)
 
 set -e
@@ -186,6 +187,19 @@ if [ "$(id -u)" = "0" ] && [ "${HOST_UID}" != "0" ]; then
       UNIX-LISTEN:"${CONTAINER_SSH_SOCK}",fork,mode=600 \
       TCP:host.docker.internal:"${CAGE_SSH_RELAY_PORT}" &
     export SSH_AUTH_SOCK="$CONTAINER_SSH_SOCK"
+    sleep 0.2
+  fi
+
+  # Worker broker socket, same shape as the ssh relay above. The far end is the
+  # host broker, never Herdr: see cage_setup_workers and docs/herdr-worker-broker.md.
+  if [ -n "${CAGE_WORKER_RELAY_PORT:-}" ]; then
+    echo "[cage] wiring worker broker relay..." >&2
+    CONTAINER_WORKER_SOCK="/tmp/box-worker.sock"
+    rm -f "$CONTAINER_WORKER_SOCK"
+    gosu "${USERNAME}" socat \
+      UNIX-LISTEN:"${CONTAINER_WORKER_SOCK}",fork,mode=600 \
+      TCP:host.docker.internal:"${CAGE_WORKER_RELAY_PORT}" &
+    export CAGE_WORKER_SOCKET="$CONTAINER_WORKER_SOCK"
     sleep 0.2
   fi
 

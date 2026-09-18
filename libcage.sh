@@ -22,7 +22,8 @@
 #                     appends the user's passthrough args to it)
 #   BOX_RUN_ARGS      optional array: payload-owned docker-run arguments, such
 #                     as a loopback-only published port for a browser UI
-#   BOX_HERDR_AGENT   optional: the Herdr agent kind this harness reports as
+#   BOX_HERDR_AGENT   optional: the Herdr agent kind this harness reports as, and
+#                     the default worker kind for --workers
 #                     (claude, codex, pi, ...). Omit when Herdr has no kind for
 #                     the harness.
 #
@@ -74,6 +75,8 @@ _cage_check_update_bg() {
 # harness sees them); a literal -- ends cage parsing. Unknown args go to the
 # wrapper's box_parse_arg hook, then to the harness passthrough.
 NO_SSH=0
+WORKERS=0
+WORKER_KINDS=""
 UPGRADE=0
 ENGINE_MODE=""
 BOX_NAME=""
@@ -84,6 +87,8 @@ cage_parse_args() {
     case "$1" in
       --) shift; _passthrough+=("$@"); break ;;
       --no-ssh) NO_SSH=1 ;;
+      --workers) WORKERS=1 ;;
+      --workers=*) WORKERS=1; WORKER_KINDS="${1#*=}" ;;
       --upgrade) UPGRADE=1 ;;
       --engine)
         shift; ENGINE_MODE="${1:-}"
@@ -235,27 +240,36 @@ cage_resolve_engine() {
 }
 
 # ---------------------------------------------------------------------------
-# SSH mounts + colima ssh-agent relay. Ported verbatim; appends to
-# override_mounts / env_args and sets _SSH_RELAY_PID.
-_SSH_RELAY_PID=""
-cage_setup_ssh() {
-  if [[ $NO_SSH -ne 0 ]]; then
-    log "ssh disabled (--no-ssh): no key mount, no agent forwarding"
-    return 0
-  fi
-  [[ -d "${HOME}/.ssh" ]] && override_mounts+=(-v "${HOME}/.ssh:${HOME}/.ssh:ro")
-  [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] || return 0
-  if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
-    local relay_port_file; relay_port_file=$(mktemp /tmp/claude-box-relay.XXXXXX)
-    python3 -c "
-import socket, sys, threading, signal, os
-src = '${SSH_AUTH_SOCK}'
+# Add the host-gateway alias once, however many relays below ask for it.
+_CAGE_HOST_GATEWAY=0
+cage_add_host_gateway() {
+  [[ $_CAGE_HOST_GATEWAY -eq 0 ]] || return 0
+  _CAGE_HOST_GATEWAY=1
+  env_args+=(--add-host "host.docker.internal:host-gateway")
+}
+
+# A colima box cannot reach a host unix socket: virtiofs carries files, not
+# sockets. Relay one onto a loopback TCP port the box dials through
+# host.docker.internal, and socat turns it back into a socket in there.
+# Sets _CAGE_RELAY_PORT, empty when the relay did not come up, and records the
+# relay pid for cage_cleanup. Deliberately not echoed: read through $(...) the
+# backgrounded relay would hold the substitution's pipe open and hang it, and
+# the pid would land in a subshell and never be killed. Its stdout goes nowhere
+# (it never writes any) so a backgrounded relay can never hold a caller's pipe
+# open; stderr is left attached so a failure is still visible.
+_CAGE_RELAY_PIDS=()
+_CAGE_RELAY_PORT=""
+cage_relay_unix_socket() {
+  local src="$1" port_file port="" i
+  port_file=$(mktemp /tmp/claude-box-relay.XXXXXX)
+  python3 -c '
+import socket, sys, threading, signal
+src, port_file = sys.argv[1], sys.argv[2]
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(('127.0.0.1', 0))
-port = server.getsockname()[1]
-with open('${relay_port_file}', 'w') as f:
-    f.write(str(port))
+server.bind(("127.0.0.1", 0))
+with open(port_file, "w") as f:
+    f.write(str(server.getsockname()[1]))
 server.listen(8)
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 def relay(a, b):
@@ -269,21 +283,33 @@ while True:
     u.connect(src)
     threading.Thread(target=relay, args=(c, u), daemon=True).start()
     threading.Thread(target=relay, args=(u, c), daemon=True).start()
-" &
-    _SSH_RELAY_PID=$!
-    local port="" i
-    for i in $(seq 1 30); do
-      [[ -s "$relay_port_file" ]] && { port=$(<"$relay_port_file"); break; }
-      sleep 0.1
-    done
-    rm -f "$relay_port_file"
+' "$src" "$port_file" >/dev/null &
+  _CAGE_RELAY_PIDS+=($!)
+  for i in $(seq 1 30); do
+    [[ -s "$port_file" ]] && { port=$(<"$port_file"); break; }
+    sleep 0.1
+  done
+  rm -f "$port_file"
+  _CAGE_RELAY_PORT="$port"
+}
+
+# ---------------------------------------------------------------------------
+# SSH mounts + colima ssh-agent relay. Appends to override_mounts / env_args.
+cage_setup_ssh() {
+  if [[ $NO_SSH -ne 0 ]]; then
+    log "ssh disabled (--no-ssh): no key mount, no agent forwarding"
+    return 0
+  fi
+  [[ -d "${HOME}/.ssh" ]] && override_mounts+=(-v "${HOME}/.ssh:${HOME}/.ssh:ro")
+  [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] || return 0
+  if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
+    cage_relay_unix_socket "$SSH_AUTH_SOCK"
+    local port="$_CAGE_RELAY_PORT"
     if [[ -z "$port" ]]; then
       warn "SSH agent relay failed to start: signing will not work"
-      kill "$_SSH_RELAY_PID" 2>/dev/null || true
-      _SSH_RELAY_PID=""
     else
       env_args+=(-e "CAGE_SSH_RELAY_PORT=${port}")
-      env_args+=(--add-host "host.docker.internal:host-gateway")
+      cage_add_host_gateway
     fi
   elif [[ "$SSH_AUTH_SOCK" == /private/tmp/com.apple.launchd.* ]]; then
     override_mounts+=(-v "/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock")
@@ -292,6 +318,110 @@ while True:
     override_mounts+=(-v "${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}")
     env_args+=(-e "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}")
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Worker broker (opt-in: --workers). Starts herdr-worker-broker on the HOST, in
+# the Herdr pane this was typed in, and relays only the broker's OWN socket into
+# the box. Herdr's socket never crosses and no HERDR_* variable is forwarded, so
+# the box can ask for a worker but can never say what a worker runs. The pane,
+# project dir and agent kind are settled here, before the box exists.
+# See docs/herdr-worker-broker.md.
+cage_setup_workers() {
+  [[ $WORKERS -eq 1 ]] || return 0
+
+  if [[ "${HERDR_ENV:-}" != "1" || -z "${HERDR_PANE_ID:-}" ]]; then
+    warn "--workers: this shell is not inside a Herdr pane; no workers"
+    return 0
+  fi
+  if [[ -z "${BOX_HERDR_AGENT:-}" ]]; then
+    warn "--workers: ${BOX_LABEL} has no Herdr agent kind; no workers"
+    return 0
+  fi
+  local broker="${BOX_SRC_DIR}/herdr-worker-broker"
+  if [[ ! -x "$broker" ]]; then
+    warn "--workers: ${broker} is missing or not executable; no workers"
+    return 0
+  fi
+
+  # The kinds a worker may be, fixed here and never taken from the box. Each
+  # must have a wrapper in this repo, so every worker is itself a cage.
+  local kinds="${WORKER_KINDS:-$BOX_HERDR_AGENT}"
+  local allow=() kind launcher
+  for kind in $(printf '%s' "$kinds" | tr ',' ' '); do
+    launcher="${BOX_SRC_DIR}/${kind}-box"
+    if [[ ! -x "$launcher" ]]; then
+      warn "--workers: no wrapper for kind '${kind}' at ${launcher}; skipping it"
+      continue
+    fi
+    allow+=(--allow "${kind}=${launcher}")
+  done
+  if [[ ${#allow[@]} -eq 0 ]]; then
+    warn "--workers: no usable agent kinds; no workers"
+    return 0
+  fi
+
+  local dir="${HOME}/.${BOX_LABEL}/brokers"
+  local key="${HERDR_PANE_ID//[^a-zA-Z0-9]/_}"
+  local sock="${dir}/${key}.sock" logfile="${dir}/${key}.log"
+  mkdir -p "$dir"
+
+  # One box per orchestrator pane: a live socket means another box already owns
+  # this pane's dock, and a second registry over it would fight the first.
+  if cage_socket_live "$sock"; then
+    warn "--workers: a worker broker is already running for pane ${HERDR_PANE_ID}; no workers"
+    return 0
+  fi
+
+  "$broker" \
+    --pane "$HERDR_PANE_ID" \
+    --project "$PROJECT_DIR" \
+    "${allow[@]}" \
+    --socket "$sock" \
+    --log "$logfile" &
+  _CAGE_RELAY_PIDS+=($!)
+
+  local i
+  for i in $(seq 1 40); do
+    [[ -S "$sock" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -S "$sock" ]]; then
+    warn "--workers: broker did not come up; no workers (see ${logfile})"
+    return 0
+  fi
+
+  if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
+    cage_relay_unix_socket "$sock"
+    local port="$_CAGE_RELAY_PORT"
+    if [[ -z "$port" ]]; then
+      warn "--workers: broker relay failed to start; no workers"
+      return 0
+    fi
+    env_args+=(-e "CAGE_WORKER_RELAY_PORT=${port}")
+    cage_add_host_gateway
+  else
+    override_mounts+=(-v "${sock}:/tmp/box-worker.sock")
+    env_args+=(-e "CAGE_WORKER_SOCKET=/tmp/box-worker.sock")
+  fi
+
+  log "workers enabled: box-worker spawn/ask/read/poll/close/list, kinds ${kinds}"
+}
+
+# True when something is listening on a unix socket, so a stale file from a
+# broker that died does not block the next launch.
+cage_socket_live() {
+  [[ -S "$1" ]] || return 1
+  python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+' "$1" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -351,10 +481,11 @@ cage_sync_back() {
 }
 
 cage_cleanup() {
-  if [[ -n "$_SSH_RELAY_PID" ]]; then
-    kill "$_SSH_RELAY_PID" 2>/dev/null || true
-    wait "$_SSH_RELAY_PID" 2>/dev/null || true
-  fi
+  local pid
+  for pid in "${_CAGE_RELAY_PIDS[@]+"${_CAGE_RELAY_PIDS[@]}"}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   [[ -n "$NAME_FILE" ]] && rm -f "$NAME_FILE"
 }
 
@@ -364,11 +495,13 @@ cage_build_images() {
   local cage_df="${BOX_SRC_DIR}/Dockerfile.cage"
   local cage_entry="${BOX_SRC_DIR}/entrypoint-cage.sh"
   local probe="${BOX_SRC_DIR}/userns-probe.sh"
+  local client="${BOX_SRC_DIR}/box-worker"
   local cage_marker="${HOME}/.claude-box/.built-cage"
 
   local need=0
   if ! docker image inspect "$CAGE_IMAGE" &>/dev/null; then need=1
-  elif [[ "$cage_df" -nt "$cage_marker" || "$cage_entry" -nt "$cage_marker" || "$probe" -nt "$cage_marker" ]]; then need=1; fi
+  elif [[ "$cage_df" -nt "$cage_marker" || "$cage_entry" -nt "$cage_marker" \
+        || "$probe" -nt "$cage_marker" || "$client" -nt "$cage_marker" ]]; then need=1; fi
   if [[ $need -eq 1 ]]; then
     log "building cage-base image..."
     if ! docker build -f "$cage_df" -t "$CAGE_IMAGE" "$BOX_SRC_DIR"; then
@@ -531,6 +664,7 @@ cage_run() {
 
   override_mounts=()
   cage_setup_ssh
+  cage_setup_workers
   cage_stage_gitconfig
 
   # Share XDG cache and ~/.local/bin across boxes (generic).
