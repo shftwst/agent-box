@@ -112,8 +112,10 @@ has no rule for it and falls back to idle. So `spawn` waits on `pane wait-output
 harness prompt instead of trusting `agent get`, `ask` watches for a working-then-idle
 transition rather than a single idle sample (a lone idle sample is the pre-work state, not
 completion), and `read` uses `pane read` because `agent read` is empty until the harness
-is fully up. The default readiness pattern matches the claude footer; `--ready-regex`
-overrides it for another harness.
+is fully up. Readiness patterns are per kind (claude and codex have built-in defaults);
+`--ready-regex KIND=REGEX` overrides or adds one. The codex default matches its composer
+placeholder ("Ask Codex to do anything"), so readiness fires past codex's startup screens
+rather than on the bare prompt marker.
 
 ### Worker model and endpoint
 
@@ -134,6 +136,12 @@ max), carried as `CLAUDE_BOX_EFFORT`, which `claude-box` turns into the launch f
 box passes its usual level and the broker adjusts it for the model: the qwen gateway only
 serves low and medium, so minimal folds to low and high, xhigh and max fold to medium.
 That fold is a workaround for that gateway's behaviour, not a property of the model.
+
+A codex worker picks its model and endpoint differently: codex configures those through
+profiles, not `ANTHROPIC_*`, so `spawn` takes a `profile` field, carried as
+`CODEX_BOX_PROFILE`, which `codex-box` turns into `codex -p <profile>`. The named
+`$CODEX_HOME/<name>.config.toml` supplies the model, provider and effort. Spawn a codex
+worker with `--kind codex` (the launch must allow it: `--workers=claude,codex`).
 
 Transport is a unix socket on the host, reached from the box the same way the ssh agent
 already is: `cage_relay_unix_socket` onto a loopback TCP port, socat back to a socket

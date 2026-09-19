@@ -44,6 +44,14 @@ WORKER_ENV = {
     "auth_token": "ANTHROPIC_AUTH_TOKEN",
 }
 
+# Pane output that means a spawned worker of a kind is at its prompt. claude is
+# confirmed; codex matches its composer marker and is unverified against a caged
+# codex. Override or extend per kind with --ready-regex KIND=REGEX.
+READY_REGEX = {
+    "claude": r"bypass permissions on|\? for shortcuts",
+    "codex": r"Ask Codex to do anything",
+}
+
 # Claude Code effort levels. claude-box turns CLAUDE_BOX_EFFORT into --effort.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
@@ -87,10 +95,11 @@ class Broker:
     # falls back to idle for a worker whose TUI runs behind a container tty, so
     # spawn waits for the harness to render its prompt and ask watches for a
     # working-then-idle transition rather than trusting a single idle sample.
-    def _await_ready(self, pane):
+    def _await_ready(self, pane, kind):
+        regex = self.opts.ready_regex.get(kind) or "|".join(self.opts.ready_regex.values())
         self._herdr(
             "pane", "wait-output", pane,
-            "--regex", self.opts.ready_regex,
+            "--regex", regex,
             "--timeout", str(self.opts.ready_timeout),
             wait_ms=self.opts.ready_timeout,
         )
@@ -155,6 +164,18 @@ class Broker:
         args += ["--env", f"CLAUDE_BOX_EFFORT={effort}"]
         return effort
 
+    # A codex profile names a $CODEX_HOME/<name>.config.toml that fixes the
+    # model, provider and effort. codex-box turns CODEX_BOX_PROFILE into -p.
+    def _worker_profile(self, req, args):
+        profile = req.get("profile")
+        if profile is None:
+            return None
+        if (not isinstance(profile, str) or not profile or len(profile) > MAX_ENV
+                or any(ord(c) < 0x20 or ord(c) == 0x7f for c in profile)):
+            raise Refused("profile is empty or has an unusable value")
+        args += ["--env", f"CODEX_BOX_PROFILE={profile}"]
+        return profile
+
     # -- verbs ------------------------------------------------------------
     def spawn(self, req):
         name = req.get("name", "")
@@ -171,6 +192,7 @@ class Broker:
 
         env_args = self._worker_env(req)
         effort = self._worker_effort(req, env_args)
+        profile = self._worker_profile(req, env_args)
 
         if self.dock_tail is None:
             split = self._herdr(
@@ -196,7 +218,7 @@ class Broker:
         # host harness uncaged, so run the wrapper as the pane's command instead.
         try:
             self._herdr("pane", "run", pane, self.opts.allowed[kind])
-            self._await_ready(pane)
+            self._await_ready(pane, kind)
         except Refused:
             self._herdr("pane", "close", pane)
             raise
@@ -209,6 +231,8 @@ class Broker:
                 result[field] = req[field]
         if effort is not None:
             result["effort"] = effort
+        if profile is not None:
+            result["profile"] = profile
         return result
 
     def ask(self, req):
@@ -325,9 +349,9 @@ def main():
     parser.add_argument("--max-prompt", type=int, default=8192)
     parser.add_argument("--max-lines", type=int, default=2000)
     parser.add_argument("--timeout-cap", type=int, default=600000)
-    parser.add_argument("--ready-regex", default=r"bypass permissions on|\? for shortcuts",
-                        help="pane output that means a spawned worker is at its prompt. "
-                             "The default matches the claude harness footer.")
+    parser.add_argument("--ready-regex", action="append", default=[], metavar="KIND=REGEX",
+                        help="override the readiness pattern for a kind, repeatable. "
+                             "Built-in defaults cover claude and codex.")
     parser.add_argument("--ready-timeout", type=int, default=300000,
                         help="how long to wait for a spawned worker to reach its prompt, "
                              "generous because a cold cage can take minutes to start")
@@ -350,6 +374,14 @@ def main():
         if not kind or not os.access(launcher, os.X_OK):
             sys.exit(f"herdr-worker-broker: bad --allow {entry!r}")
         opts.allowed[kind] = launcher
+
+    ready = dict(READY_REGEX)
+    for entry in opts.ready_regex:
+        kind, sep, regex = entry.partition("=")
+        if not kind or not sep or not regex:
+            sys.exit(f"herdr-worker-broker: bad --ready-regex {entry!r} (want KIND=REGEX)")
+        ready[kind] = regex
+    opts.ready_regex = ready
 
     broker = Broker(opts)
 

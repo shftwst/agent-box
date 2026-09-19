@@ -12,7 +12,7 @@ import socket
 import sys
 
 USAGE = """usage:
-  box-worker spawn <name> [--kind K] [--model M] [--base-url URL] [--auth-token T] [--effort L]
+  box-worker spawn <name> [--kind K] [--model M] [--base-url URL] [--auth-token T] [--effort L] [--profile P]
   box-worker ask   <name> <text> [--timeout MS]
   box-worker read  <name> [--lines N]
   box-worker poll  <name>
@@ -22,10 +22,12 @@ USAGE = """usage:
 names match [a-z][a-z0-9_-]{0,31} and refer only to workers this box created.
 spawn --model / --base-url / --auth-token set the worker's ANTHROPIC_MODEL,
 ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN, so the orchestrator can point a
-worker at any model or endpoint, including a local one."""
+worker at any model or endpoint, including a local one. --effort sets the claude
+effort level. --profile selects a codex profile ($CODEX_HOME/<name>.config.toml),
+which is how a codex worker picks its model and endpoint."""
 
 VALUE_FLAGS = {"--timeout", "--lines", "--kind", "--model", "--small-fast-model",
-               "--base-url", "--auth-token", "--effort"}
+               "--base-url", "--auth-token", "--effort", "--profile"}
 
 
 def flag_value(rest, name):
@@ -94,7 +96,7 @@ def parse(argv):
         for flag, key in (("--kind", "kind"), ("--model", "model"),
                           ("--small-fast-model", "small_fast_model"),
                           ("--base-url", "base_url"), ("--auth-token", "auth_token"),
-                          ("--effort", "effort")):
+                          ("--effort", "effort"), ("--profile", "profile")):
             value = flag_value(rest, flag)
             if value is not None:
                 request[key] = value

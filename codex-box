@@ -49,6 +49,12 @@ BOX_FORWARD_VARS=(OPENAI_API_KEY)
 # they live under ~/.codex = the persisted, host-seeded state volume. A macOS
 # Keychain token can't cross into a Linux box; a file one seeds straight in.
 BOX_PAYLOAD_CMD=(codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_oauth_credentials_store="file"')
+# Trust the launch directory up-front. The cage is the real boundary and codex
+# already runs with approvals/sandbox bypassed, so codex's interactive trust
+# challenge only serves to wedge a headless (broker-spawned) worker.
+BOX_PAYLOAD_CMD+=(-c "projects.\"${PWD}\".trust_level=\"trusted\"")
+# CODEX_BOX_PROFILE (set by the worker broker) layers a $CODEX_HOME/<name>.config.toml.
+[[ -n "${CODEX_BOX_PROFILE:-}" ]] && BOX_PAYLOAD_CMD+=(-p "$CODEX_BOX_PROFILE")
 
 # shellcheck source=libcage.sh
 source "${BOX_SRC_DIR}/libcage.sh"
