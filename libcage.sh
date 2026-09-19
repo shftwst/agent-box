@@ -443,6 +443,26 @@ EOF
   fi
 }
 
+_BRIEF_BEGIN="<!-- agent-box:workers:begin (managed, do not edit) -->"
+_BRIEF_END="<!-- agent-box:workers:end -->"
+
+# Insert/refresh the worker brief in a harness instruction file, delimited by
+# markers so it is idempotent, removed when workers are off, and leaves any
+# surrounding user content untouched.
+cage_inject_brief() {
+  local file="$1" dir
+  [[ -n "$file" ]] || return 0
+  dir="$(dirname "$file")"
+  [[ -d "$dir" ]] || mkdir -p "$dir"
+  if [[ -f "$file" ]]; then
+    local tmp="${file}.brief.$$"
+    awk -v b="$_BRIEF_BEGIN" -v e="$_BRIEF_END" '
+      $0==b {skip=1; next} $0==e {skip=0; next} !skip {print}' "$file" > "$tmp" && mv "$tmp" "$file"
+  fi
+  [[ "${_CAGE_WORKERS_ACTIVE:-0}" == 1 ]] || return 0
+  { printf '\n%s\n' "$_BRIEF_BEGIN"; cage_worker_brief; printf '\n%s\n' "$_BRIEF_END"; } >> "$file"
+}
+
 # True when something is listening on a unix socket, so a stale file from a
 # broker that died does not block the next launch.
 cage_socket_live() {
@@ -719,6 +739,11 @@ cage_run() {
 
   # Payload staging: its own mounts, relay files (AGENTS.md), state seeding.
   declare -F box_stage >/dev/null && box_stage
+
+  # Orchestrator brief: each box points BOX_BRIEF_FILE at its harness's native
+  # global instructions (claude CLAUDE.md, codex/pi AGENTS.md). Managed between
+  # markers, so it clears itself when workers are off and never clobbers content.
+  [[ -n "${BOX_BRIEF_FILE:-}" ]] && cage_inject_brief "$BOX_BRIEF_FILE"
 
   cage_flush_state_to_vm
 

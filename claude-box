@@ -50,6 +50,8 @@ BOX_IMAGE="claude-box"
 BOX_DOCKERFILE="${BOX_SRC_DIR}/Dockerfile.claude"
 BOX_STATE_DIR="${HOME}/.claude-box/state"
 BOX_STATE_MOUNT="${CLAUDE_HOME}"
+# Where libcage injects the worker brief: claude reads CLAUDE.md natively.
+BOX_BRIEF_FILE="${BOX_STATE_DIR}/CLAUDE.md"
 BOX_ENV_PREFIX="CLAUDE_BOX"
 BOX_HERDR_AGENT="claude"
 BOX_FORWARD_VARS=(ANTHROPIC_API_KEY LINEAR_API_KEY)
@@ -121,10 +123,6 @@ box_stage() {
     printf '\n<!-- %s -->\n' "$f" >> "${STATE_DIR}/CLAUDE.md"
     cat "$f" >> "${STATE_DIR}/CLAUDE.md"
   done
-
-  # With workers active, tell the orchestrator how to drive them and what local
-  # models it can point them at, so it needn't be told each session.
-  [[ "${_CAGE_WORKERS_ACTIVE:-0}" == 1 ]] && cage_worker_brief >> "${STATE_DIR}/CLAUDE.md"
 
   # Concatenate AGENTS.md the same way into the cage relay (the entrypoint copies
   # it to ~/.agents/AGENTS.md). Skip if the cage couldn't provide a writable relay.

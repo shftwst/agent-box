@@ -226,13 +226,15 @@ box-worker read  <name> [--lines N]  box-worker list
 Nothing Herdr-shaped is installed in the box and no `HERDR_*` variable is forwarded, so
 an agent in the box cannot mistake itself for a Herdr-managed process.
 
-So the orchestrator does not have to be told about `box-worker` each session, `box_stage`
-appends a worker brief to the cage's assembled `CLAUDE.md` when workers are active
-(`_CAGE_WORKERS_ACTIVE`, set by `cage_setup_workers`). The brief lists the verbs and the
-available kinds, and includes a curated model catalogue if `WORKER_MODELS_FILE`
-(default `~/.config/agent-box/worker-models.md`) exists. It is written only into the
-per-cage assembled copy, never a source, repo, or global `CLAUDE.md`, and is rebuilt each
-launch.
+So the orchestrator does not have to be told about `box-worker` each session, libcage
+injects a worker brief into the box's own harness instructions when workers are active
+(`_CAGE_WORKERS_ACTIVE`, set by `cage_setup_workers`). Each box points `BOX_BRIEF_FILE` at
+its harness's native global file, claude `CLAUDE.md`, codex and pi `AGENTS.md`, and
+`cage_inject_brief` writes the brief there between managed markers: idempotent, removed
+when workers are off, and never clobbering surrounding user content. The brief lists the
+verbs and available kinds, and includes a curated model catalogue if `WORKER_MODELS_FILE`
+(default `~/.config/agent-box/worker-models.md`) exists. It only ever touches the
+per-cage state copy, never a source, repo, or the host's global instruction files.
 
 ## A reduction worth taking first
 

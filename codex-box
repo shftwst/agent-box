@@ -207,6 +207,9 @@ box_stage() {
     printf '\n<!-- %s -->\n' "$f" >> "${RELAY_DIR}/AGENTS.md"
     cat "$f" >> "${RELAY_DIR}/AGENTS.md"
   done
+
+  # Codex reads this merged AGENTS.md; libcage injects the worker brief here.
+  BOX_BRIEF_FILE="${RELAY_DIR}/AGENTS.md"
 }
 
 # Sync the refreshed account login back to the host so host codex and the next
