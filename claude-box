@@ -54,6 +54,8 @@ BOX_ENV_PREFIX="CLAUDE_BOX"
 BOX_HERDR_AGENT="claude"
 BOX_FORWARD_VARS=(ANTHROPIC_API_KEY LINEAR_API_KEY)
 BOX_PAYLOAD_CMD=(claude --dangerously-skip-permissions)
+# CLAUDE_BOX_EFFORT (set by the worker broker) picks the session effort level.
+[[ -n "${CLAUDE_BOX_EFFORT:-}" ]] && BOX_PAYLOAD_CMD+=(--effort "$CLAUDE_BOX_EFFORT")
 # Extra files Dockerfile.claude COPYs, so editing them forces an image rebuild.
 BOX_BUILD_INPUTS=("${BOX_SRC_DIR}/payload-init-claude.sh" "${BOX_SRC_DIR}/claude-box-theme.json")
 

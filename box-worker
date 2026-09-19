@@ -12,14 +12,36 @@ import socket
 import sys
 
 USAGE = """usage:
-  box-worker spawn <name>
+  box-worker spawn <name> [--kind K] [--model M] [--base-url URL] [--auth-token T] [--effort L]
   box-worker ask   <name> <text> [--timeout MS]
   box-worker read  <name> [--lines N]
   box-worker poll  <name>
   box-worker close <name>
   box-worker list
 
-names match [a-z][a-z0-9_-]{0,31} and refer only to workers this box created."""
+names match [a-z][a-z0-9_-]{0,31} and refer only to workers this box created.
+spawn --model / --base-url / --auth-token set the worker's ANTHROPIC_MODEL,
+ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN, so the orchestrator can point a
+worker at any model or endpoint, including a local one."""
+
+VALUE_FLAGS = {"--timeout", "--lines", "--kind", "--model", "--small-fast-model",
+               "--base-url", "--auth-token", "--effort"}
+
+
+def flag_value(rest, name):
+    return rest[rest.index(name) + 1] if name in rest else None
+
+
+def free_text(rest):
+    out, skip = [], False
+    for token in rest:
+        if skip:
+            skip = False
+        elif token in VALUE_FLAGS:
+            skip = True
+        elif not token.startswith("--"):
+            out.append(token)
+    return out
 
 
 def call(request):
@@ -48,6 +70,8 @@ def parse(argv):
     verb, rest = argv[0], argv[1:]
     if verb == "list":
         return {"verb": "list"}
+    if verb not in ("spawn", "ask", "read", "poll", "close"):
+        sys.exit(f"box-worker: unknown verb {verb!r}\n\n{USAGE}")
     if not rest:
         sys.exit(f"box-worker: {verb} needs a worker name\n\n{USAGE}")
 
@@ -55,16 +79,25 @@ def parse(argv):
     rest = rest[1:]
 
     if verb == "ask":
-        text = [a for a in rest if not a.startswith("--")]
+        text = free_text(rest)
         if not text:
             sys.exit("box-worker: ask needs some text")
         request["text"] = " ".join(text)
-        if "--timeout" in rest:
-            request["timeout"] = int(rest[rest.index("--timeout") + 1])
-    elif verb == "read" and "--lines" in rest:
-        request["lines"] = int(rest[rest.index("--lines") + 1])
-    elif verb not in ("spawn", "poll", "close"):
-        sys.exit(f"box-worker: unknown verb {verb!r}\n\n{USAGE}")
+        timeout = flag_value(rest, "--timeout")
+        if timeout is not None:
+            request["timeout"] = int(timeout)
+    elif verb == "read":
+        lines = flag_value(rest, "--lines")
+        if lines is not None:
+            request["lines"] = int(lines)
+    elif verb == "spawn":
+        for flag, key in (("--kind", "kind"), ("--model", "model"),
+                          ("--small-fast-model", "small_fast_model"),
+                          ("--base-url", "base_url"), ("--auth-token", "auth_token"),
+                          ("--effort", "effort")):
+            value = flag_value(rest, flag)
+            if value is not None:
+                request[key] = value
 
     return request
 

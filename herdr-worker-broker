@@ -25,13 +25,32 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 ORCHESTRATOR_RATIO = 0.65
 WORKER_RATIO = 0.5
+POLL_INTERVAL = 0.5
+MAX_ENV = 8192
+
+# Values the box may set on a worker's environment. The box orchestrates and
+# knows the task, so it picks the model and endpoint freely; the broker only
+# refuses a value it could not carry safely (empty, oversized, control chars).
+WORKER_ENV = {
+    "model": "ANTHROPIC_MODEL",
+    "small_fast_model": "ANTHROPIC_SMALL_FAST_MODEL",
+    "base_url": "ANTHROPIC_BASE_URL",
+    "auth_token": "ANTHROPIC_AUTH_TOKEN",
+}
+
+# Claude Code effort levels. claude-box turns CLAUDE_BOX_EFFORT into --effort.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+# The qwen gateway lists all six effort names but only serves low and medium;
+# minimal, high, xhigh and max return a 500, so fold them onto the nearest level
+# that works. This is a workaround for that gateway, not a property of qwen.
+QWEN_EFFORT_FALLBACK = {"minimal": "low", "high": "medium", "xhigh": "medium", "max": "medium"}
 
 
 class Refused(Exception):
@@ -39,20 +58,20 @@ class Refused(Exception):
 
 
 class Broker:
-    def __init__(self, opts, shim_dir):
+    def __init__(self, opts):
         self.opts = opts
-        self.shim_dir = shim_dir
         self.workers = {}
         self.dock_tail = None
         self.lock = threading.Lock()
 
     # -- Herdr ------------------------------------------------------------
-    def _herdr(self, *args):
+    def _herdr(self, *args, wait_ms=None):
+        budget = (wait_ms if wait_ms is not None else self.opts.timeout_cap)
         result = subprocess.run(
             [self.opts.herdr_bin, *args],
             capture_output=True,
             text=True,
-            timeout=self.opts.timeout_cap / 1000 + 30,
+            timeout=budget / 1000 + 30,
         )
         if result.returncode != 0:
             raise Refused(f"herdr {args[0]} {args[1]} failed: {result.stderr.strip()[:200]}")
@@ -61,10 +80,80 @@ class Broker:
         except json.JSONDecodeError:
             return {"raw": result.stdout}
 
+    def _status(self, pane):
+        return self._herdr("agent", "get", pane).get("result", {}).get("agent", {}).get("agent_status")
+
+    # Herdr cannot detect a caged agent's readiness or completion: agent state
+    # falls back to idle for a worker whose TUI runs behind a container tty, so
+    # spawn waits for the harness to render its prompt and ask watches for a
+    # working-then-idle transition rather than trusting a single idle sample.
+    def _await_ready(self, pane):
+        self._herdr(
+            "pane", "wait-output", pane,
+            "--regex", self.opts.ready_regex,
+            "--timeout", str(self.opts.ready_timeout),
+            wait_ms=self.opts.ready_timeout,
+        )
+
+    def _await_idle(self, pane, timeout):
+        start = time.monotonic()
+        saw_working = False
+        while True:
+            status = self._status(pane)
+            if status == "working":
+                saw_working = True
+            elif status == "idle":
+                if saw_working:
+                    return status
+                if (time.monotonic() - start) * 1000 >= self.opts.idle_grace:
+                    return status
+            if (time.monotonic() - start) * 1000 >= timeout:
+                raise Refused("worker did not return within timeout")
+            time.sleep(POLL_INTERVAL)
+
     def _pane_of(self, name):
         if name not in self.workers:
             raise Refused(f"no worker named {name!r}")
         return self.workers[name]
+
+    # `pane split --env KEY=VALUE` sets the value on the pane process directly,
+    # which the launcher inherits. The broker passes it as one argv element, so a
+    # value never reaches a shell and cannot become a command.
+    def _worker_env(self, req):
+        chosen = {}
+        for field, var in WORKER_ENV.items():
+            value = req.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value:
+                raise Refused(f"{field} must be a non-empty string")
+            if len(value) > MAX_ENV or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+                raise Refused(f"{field} value is unusable (too long or has control characters)")
+            chosen[var] = value
+        # A worker on a local-only endpoint has no Claude model for the small,
+        # fast background calls, so point those at the same model unless the box
+        # set one, matching claude-box's ollama preset.
+        if "ANTHROPIC_MODEL" in chosen:
+            chosen.setdefault("ANTHROPIC_SMALL_FAST_MODEL", chosen["ANTHROPIC_MODEL"])
+        args = []
+        for var, value in chosen.items():
+            args += ["--env", f"{var}={value}"]
+        return args
+
+    # Effort becomes claude's --effort, carried as CLAUDE_BOX_EFFORT. The box
+    # passes its usual level and the broker adjusts it for the model: a qwen
+    # endpoint has no high or max, so those fold onto xhigh. Returns the level
+    # actually applied, or None, and appends the env to args.
+    def _worker_effort(self, req, args):
+        effort = req.get("effort")
+        if effort is None:
+            return None
+        if not isinstance(effort, str) or effort not in EFFORTS:
+            raise Refused(f"effort must be one of {', '.join(EFFORTS)}")
+        if "qwen" in (req.get("model") or "").lower():
+            effort = QWEN_EFFORT_FALLBACK.get(effort, effort)
+        args += ["--env", f"CLAUDE_BOX_EFFORT={effort}"]
+        return effort
 
     # -- verbs ------------------------------------------------------------
     def spawn(self, req):
@@ -80,20 +169,21 @@ class Broker:
         if kind not in self.opts.allowed:
             raise Refused(f"kind {kind!r} not permitted (allowed: {', '.join(self.opts.allowed)})")
 
+        env_args = self._worker_env(req)
+        effort = self._worker_effort(req, env_args)
+
         if self.dock_tail is None:
             split = self._herdr(
                 "pane", "split", "--pane", self.opts.pane,
                 "--direction", "right", "--ratio", str(ORCHESTRATOR_RATIO),
-                "--cwd", self.opts.project,
-                "--env", f"PATH={self.shim_dir}:{os.environ['PATH']}",
+                "--cwd", self.opts.project, *env_args,
                 "--no-focus",
             )
         else:
             split = self._herdr(
                 "pane", "split", "--pane", self.dock_tail,
                 "--direction", "down", "--ratio", str(WORKER_RATIO),
-                "--cwd", self.opts.project,
-                "--env", f"PATH={self.shim_dir}:{os.environ['PATH']}",
+                "--cwd", self.opts.project, *env_args,
                 "--no-focus",
             )
 
@@ -101,20 +191,25 @@ class Broker:
         if not pane:
             raise Refused("herdr pane split returned no pane id")
 
+        # The launcher is the box wrapper the host fixed for this kind, so the
+        # worker is itself a cage. `agent start --kind` would run Herdr's own
+        # host harness uncaged, so run the wrapper as the pane's command instead.
         try:
-            self._herdr(
-                "agent", "start", name,
-                "--kind", kind,
-                "--pane", pane,
-                "--timeout", str(self.opts.start_timeout),
-            )
+            self._herdr("pane", "run", pane, self.opts.allowed[kind])
+            self._await_ready(pane)
         except Refused:
             self._herdr("pane", "close", pane)
             raise
 
         self.workers[name] = pane
         self.dock_tail = pane
-        return {"name": name, "pane": pane, "kind": kind}
+        result = {"name": name, "pane": pane, "kind": kind}
+        for field in ("model", "base_url"):
+            if req.get(field) is not None:
+                result[field] = req[field]
+        if effort is not None:
+            result["effort"] = effort
+        return result
 
     def ask(self, req):
         pane = self._pane_of(req.get("name", ""))
@@ -124,17 +219,15 @@ class Broker:
         if len(text.encode()) > self.opts.max_prompt:
             raise Refused(f"prompt over {self.opts.max_prompt} bytes")
         timeout = min(int(req.get("timeout", self.opts.timeout_cap)), self.opts.timeout_cap)
-        reply = self._herdr(
-            "agent", "prompt", pane, text,
-            "--wait", "--until", "idle", "--timeout", str(timeout),
-        )
-        return {"status": reply.get("result", reply)}
+        self._herdr("agent", "prompt", pane, text)
+        self._await_idle(pane, timeout)
+        return {"status": self._herdr("agent", "get", pane).get("result", {})}
 
     def read(self, req):
         pane = self._pane_of(req.get("name", ""))
         lines = min(int(req.get("lines", 200)), self.opts.max_lines)
-        reply = self._herdr("agent", "read", pane, "--lines", str(lines))
-        return {"text": reply.get("result", reply)}
+        reply = self._herdr("pane", "read", pane, "--lines", str(lines))
+        return {"text": reply.get("raw", reply.get("result", reply))}
 
     def poll(self, req):
         pane = self._pane_of(req.get("name", ""))
@@ -219,16 +312,6 @@ def session(broker, conn, log_path):
             stream.flush()
 
 
-def write_shim(shim_dir, kind, launcher):
-    path = os.path.join(shim_dir, kind)
-    with open(path, "w") as handle:
-        handle.write(
-            "#!/usr/bin/env bash\n"
-            f"HERDR_AGENT={kind} exec {launcher} \"$@\"\n"
-        )
-    os.chmod(path, 0o755)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pane", required=True, help="orchestrator pane id, the registry key")
@@ -242,7 +325,15 @@ def main():
     parser.add_argument("--max-prompt", type=int, default=8192)
     parser.add_argument("--max-lines", type=int, default=2000)
     parser.add_argument("--timeout-cap", type=int, default=600000)
-    parser.add_argument("--start-timeout", type=int, default=120000)
+    parser.add_argument("--ready-regex", default=r"bypass permissions on|\? for shortcuts",
+                        help="pane output that means a spawned worker is at its prompt. "
+                             "The default matches the claude harness footer.")
+    parser.add_argument("--ready-timeout", type=int, default=300000,
+                        help="how long to wait for a spawned worker to reach its prompt, "
+                             "generous because a cold cage can take minutes to start")
+    parser.add_argument("--idle-grace", type=int, default=15000,
+                        help="how long ask waits for a worker to start working before "
+                             "treating a still-idle worker as an instant reply")
     parser.add_argument("--herdr-bin", default=os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr"))
     opts = parser.parse_args()
 
@@ -260,10 +351,7 @@ def main():
             sys.exit(f"herdr-worker-broker: bad --allow {entry!r}")
         opts.allowed[kind] = launcher
 
-    shim_dir = tempfile.mkdtemp(prefix="herdr-worker-shim.")
-    for kind, launcher in opts.allowed.items():
-        write_shim(shim_dir, kind, launcher)
-    broker = Broker(opts, shim_dir)
+    broker = Broker(opts)
 
     try:
         serve(broker, opts.socket, opts.log)
@@ -271,7 +359,6 @@ def main():
         pass
     finally:
         broker.shutdown()
-        shutil.rmtree(shim_dir, ignore_errors=True)
         if os.path.exists(opts.socket):
             os.unlink(opts.socket)
 

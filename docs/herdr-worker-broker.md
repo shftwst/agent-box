@@ -95,12 +95,45 @@ Workers report through files on hop (4), not by connecting to the orchestrator.
 
 | Box asks | Broker runs | Returns |
 |---|---|---|
-| `spawn <name> [kind]` | `pane split` against the registry's dock tail, then `agent start <name> --kind <kind> --pane <new>` | pane id and kind, or a refusal |
-| `ask <name> <text>` | `agent prompt <pane> <text> --wait --until idle --timeout <cap>` | final status |
-| `read <name> [lines]` | `agent read <pane> --lines <n>` | pane text |
+| `spawn <name> [kind]` | `pane split` against the registry's dock tail, then `pane run <new> <launcher>` for the box wrapper the allowlist fixes for the kind, then wait for the harness prompt to render | pane id and kind, or a refusal |
+| `ask <name> <text>` | `agent prompt <pane> <text>`, then poll `agent get <pane>` for a working-then-idle transition, bounded by the timeout cap | final status |
+| `read <name> [lines]` | `pane read <pane> --lines <n>` | pane text |
 | `poll <name>` | `agent get <pane>` | status only |
 | `close <name>` | `pane close <pane>` | ok |
 | `list` | registry contents | names, panes, statuses |
+
+`spawn` runs the box wrapper directly with `pane run`, not `agent start --kind`. Herdr
+resolves `--kind claude` to its own canonical host `claude` and ignores the pane PATH, so
+`agent start` would launch an uncaged host harness, defeating the point. Running the
+wrapper as the pane command keeps every worker a cage.
+
+Herdr cannot read the state of an agent whose TUI runs behind a container tty: detection
+has no rule for it and falls back to idle. So `spawn` waits on `pane wait-output` for the
+harness prompt instead of trusting `agent get`, `ask` watches for a working-then-idle
+transition rather than a single idle sample (a lone idle sample is the pre-work state, not
+completion), and `read` uses `pane read` because `agent read` is empty until the harness
+is fully up. The default readiness pattern matches the claude footer; `--ready-regex`
+overrides it for another harness.
+
+### Worker model and endpoint
+
+`spawn` takes optional `model`, `small_fast_model`, `base_url` and `auth_token` fields.
+The box orchestrates and knows the task, so it chooses these freely; the broker only
+refuses a value it could not carry safely (empty, over 8192 bytes, or control
+characters). They are set on the worker with `pane split --env` as `ANTHROPIC_MODEL`,
+`ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, which
+`claude-box` forwards into the cage (`libcage.sh` `FORWARD_VARS`). This is the same set
+`claude-box --ollama` presets, so a worker can point at any Anthropic-compatible endpoint,
+including a local one. When `model` is set and `small_fast_model` is not, the small model
+defaults to the same value, because a local-only endpoint has no Claude model for the
+background calls. `base_url` is the API root without `/v1`; Claude Code appends
+`/v1/messages`. The value never reaches a shell, so it cannot become a command.
+
+`spawn` also takes an optional `effort` (Claude's `--effort`: low, medium, high, xhigh,
+max), carried as `CLAUDE_BOX_EFFORT`, which `claude-box` turns into the launch flag. The
+box passes its usual level and the broker adjusts it for the model: the qwen gateway only
+serves low and medium, so minimal folds to low and high, xhigh and max fold to medium.
+That fold is a workaround for that gateway's behaviour, not a property of the model.
 
 Transport is a unix socket on the host, reached from the box the same way the ssh agent
 already is: `cage_relay_unix_socket` onto a loopback TCP port, socat back to a socket
