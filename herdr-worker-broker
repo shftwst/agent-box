@@ -122,9 +122,10 @@ class Broker:
             time.sleep(POLL_INTERVAL)
 
     def _pane_of(self, name):
-        if name not in self.workers:
-            raise Refused(f"no worker named {name!r}")
-        return self.workers[name]
+        with self.lock:
+            if name not in self.workers:
+                raise Refused(f"no worker named {name!r}")
+            return self.workers[name]
 
     # `pane split --env KEY=VALUE` sets the value on the pane process directly,
     # which the launcher inherits. The broker passes it as one argv element, so a
@@ -150,18 +151,19 @@ class Broker:
             args += ["--env", f"{var}={value}"]
         return args
 
-    # Effort becomes claude's --effort, carried as CLAUDE_BOX_EFFORT. The box
-    # passes its usual level and the broker adjusts it for the model: a qwen
-    # endpoint has no high or max, so those fold onto xhigh. Returns the level
-    # actually applied, or None, and appends the env to args.
+    # Effort becomes claude's --effort, carried as CLAUDE_BOX_EFFORT. Returns the
+    # level actually applied, or None, and appends the env to args. For a qwen
+    # model the broker pins the effort even when the box passes none, because
+    # claude's unpinned default (high) 500s the gateway; only low and medium work
+    # there, so anything higher (or unspecified) folds to medium.
     def _worker_effort(self, req, args):
         effort = req.get("effort")
-        if effort is None:
-            return None
-        if not isinstance(effort, str) or effort not in EFFORTS:
+        if effort is not None and (not isinstance(effort, str) or effort not in EFFORTS):
             raise Refused(f"effort must be one of {', '.join(EFFORTS)}")
         if "qwen" in (req.get("model") or "").lower():
-            effort = QWEN_EFFORT_FALLBACK.get(effort, effort)
+            effort = QWEN_EFFORT_FALLBACK.get(effort or "high", effort or "high")
+        elif effort is None:
+            return None
         args += ["--env", f"CLAUDE_BOX_EFFORT={effort}"]
         return effort
 
@@ -182,10 +184,6 @@ class Broker:
         name = req.get("name", "")
         if not isinstance(name, str) or not NAME.match(name):
             raise Refused("name must match [a-z][a-z0-9_-]{0,31}")
-        if name in self.workers:
-            raise Refused(f"{name} already exists")
-        if len(self.workers) >= self.opts.max_workers:
-            raise Refused(f"worker limit reached ({self.opts.max_workers})")
 
         kind = req.get("kind") or next(iter(self.opts.allowed))
         if kind not in self.opts.allowed:
@@ -195,24 +193,33 @@ class Broker:
         effort = self._worker_effort(req, env_args)
         profile = self._worker_profile(req, env_args)
 
-        if self.dock_tail is None:
-            split = self._herdr(
-                "pane", "split", "--pane", self.opts.pane,
-                "--direction", "right", "--ratio", str(ORCHESTRATOR_RATIO),
-                "--cwd", self.opts.project, *env_args,
-                "--no-focus",
-            )
-        else:
-            split = self._herdr(
-                "pane", "split", "--pane", self.dock_tail,
-                "--direction", "down", "--ratio", str(WORKER_RATIO),
-                "--cwd", self.opts.project, *env_args,
-                "--no-focus",
-            )
-
-        pane = split.get("result", {}).get("pane", {}).get("pane_id")
-        if not pane:
-            raise Refused("herdr pane split returned no pane id")
+        # Reserve the name and split off the dock tail under the lock. The split
+        # is quick; the readiness wait below is minutes long and must run unlocked
+        # so read/poll/list still work while a worker starts up.
+        with self.lock:
+            if name in self.workers:
+                raise Refused(f"{name} already exists")
+            if len(self.workers) >= self.opts.max_workers:
+                raise Refused(f"worker limit reached ({self.opts.max_workers})")
+            if self.dock_tail is None:
+                split = self._herdr(
+                    "pane", "split", "--pane", self.opts.pane,
+                    "--direction", "right", "--ratio", str(ORCHESTRATOR_RATIO),
+                    "--cwd", self.opts.project, *env_args,
+                    "--no-focus",
+                )
+            else:
+                split = self._herdr(
+                    "pane", "split", "--pane", self.dock_tail,
+                    "--direction", "down", "--ratio", str(WORKER_RATIO),
+                    "--cwd", self.opts.project, *env_args,
+                    "--no-focus",
+                )
+            pane = split.get("result", {}).get("pane", {}).get("pane_id")
+            if not pane:
+                raise Refused("herdr pane split returned no pane id")
+            self.workers[name] = pane
+            self.dock_tail = pane
 
         # The launcher is the box wrapper the host fixed for this kind, so the
         # worker is itself a cage. `agent start --kind` would run Herdr's own
@@ -221,11 +228,14 @@ class Broker:
             self._herdr("pane", "run", pane, self.opts.allowed[kind])
             self._await_ready(pane, kind)
         except Refused:
+            with self.lock:
+                if self.workers.get(name) == pane:
+                    del self.workers[name]
+                    if self.dock_tail == pane:
+                        self.dock_tail = next(reversed(list(self.workers.values())), None)
             self._herdr("pane", "close", pane)
             raise
 
-        self.workers[name] = pane
-        self.dock_tail = pane
         result = {"name": name, "pane": pane, "kind": kind}
         for field in ("model", "base_url"):
             if req.get(field) is not None:
@@ -260,18 +270,24 @@ class Broker:
 
     def close(self, req):
         name = req.get("name", "")
-        pane = self._pane_of(name)
-        self._herdr("pane", "close", pane)
-        del self.workers[name]
-        if self.dock_tail == pane:
-            self.dock_tail = next(reversed(list(self.workers.values())), None)
+        with self.lock:
+            if name not in self.workers:
+                raise Refused(f"no worker named {name!r}")
+            pane = self.workers[name]
+            self._herdr("pane", "close", pane)
+            del self.workers[name]
+            if self.dock_tail == pane:
+                self.dock_tail = next(reversed(list(self.workers.values())), None)
         return {"closed": name}
 
     def list(self, _req):
-        return {"workers": [{"name": n, "pane": p} for n, p in self.workers.items()]}
+        with self.lock:
+            return {"workers": [{"name": n, "pane": p} for n, p in self.workers.items()]}
 
     VERBS = {"spawn": spawn, "ask": ask, "read": read, "poll": poll, "close": close, "list": list}
 
+    # No global lock here: each verb takes self.lock only for the quick registry
+    # read/write, so a long ask or spawn does not block read/poll/list.
     def handle(self, line):
         try:
             req = json.loads(line)
@@ -280,8 +296,7 @@ class Broker:
             verb = req.get("verb")
             if verb not in self.VERBS:
                 raise Refused(f"unknown verb {verb!r}")
-            with self.lock:
-                return {"ok": True, **self.VERBS[verb](self, req)}
+            return {"ok": True, **self.VERBS[verb](self, req)}
         except Refused as exc:
             return {"ok": False, "error": str(exc)}
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -290,7 +305,9 @@ class Broker:
             return {"ok": False, "error": "herdr call timed out"}
 
     def shutdown(self):
-        for pane in self.workers.values():
+        with self.lock:
+            panes = list(self.workers.values())
+        for pane in panes:
             try:
                 self._herdr("pane", "close", pane)
             except Exception:
