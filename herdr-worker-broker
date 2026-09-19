@@ -50,6 +50,7 @@ WORKER_ENV = {
 READY_REGEX = {
     "claude": r"bypass permissions on|\? for shortcuts",
     "codex": r"Ask Codex to do anything",
+    "pi": r"ctrl\+c/ctrl\+d clear/exit",
 }
 
 # Claude Code effort levels. claude-box turns CLAUDE_BOX_EFFORT into --effort.

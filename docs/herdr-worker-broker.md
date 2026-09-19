@@ -112,10 +112,10 @@ has no rule for it and falls back to idle. So `spawn` waits on `pane wait-output
 harness prompt instead of trusting `agent get`, `ask` watches for a working-then-idle
 transition rather than a single idle sample (a lone idle sample is the pre-work state, not
 completion), and `read` uses `pane read` because `agent read` is empty until the harness
-is fully up. Readiness patterns are per kind (claude and codex have built-in defaults);
+is fully up. Readiness patterns are per kind (claude, codex and pi have built-in defaults);
 `--ready-regex KIND=REGEX` overrides or adds one. The codex default matches its composer
-placeholder ("Ask Codex to do anything"), so readiness fires past codex's startup screens
-rather than on the bare prompt marker.
+placeholder ("Ask Codex to do anything") and the pi default its composer footer, so
+readiness fires past each harness's startup screens rather than on a bare prompt marker.
 
 ### Worker model and endpoint
 
@@ -142,6 +142,10 @@ profiles, not `ANTHROPIC_*`, so `spawn` takes a `profile` field, carried as
 `CODEX_BOX_PROFILE`, which `codex-box` turns into `codex -p <profile>`. The named
 `$CODEX_HOME/<name>.config.toml` supplies the model, provider and effort. Spawn a codex
 worker with `--kind codex` (the launch must allow it: `--workers=claude,codex`).
+
+A pi worker (`--kind pi`, `--workers=claude,pi`) picks its model from pi's own
+`~/.pi-box/state/models.json` (mounted to `~/.pi/agent/models.json` in the cage); point it
+at any provider pi supports there. There is no per-spawn model field for pi.
 
 Transport is a unix socket on the host, reached from the box the same way the ssh agent
 already is: `cage_relay_unix_socket` onto a loopback TCP port, socat back to a socket
