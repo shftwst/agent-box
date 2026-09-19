@@ -133,11 +133,13 @@ background calls. `base_url` is the API root without `/v1`; Claude Code appends
 
 `spawn` also takes an optional `effort` (Claude's `--effort`: low, medium, high, xhigh,
 max), carried as `CLAUDE_BOX_EFFORT`, which `claude-box` turns into the launch flag. The
-box passes its usual level and the broker adjusts it for the model: the qwen gateway only
-serves low and medium, so minimal folds to low and high, xhigh and max fold to medium.
-For a qwen model the broker pins medium even when the box passes no effort, because
-claude's unpinned default (high) 500s that gateway. The fold is a workaround for that
-gateway's behaviour, not a property of the model.
+box passes its usual level and the broker adjusts it for the model. A claude worker
+reaches qwen over the Anthropic route (`output_config.effort`), whose shim currently
+serves only low and medium, so minimal folds to low, high/xhigh/max fold to medium, and
+the broker pins medium even when the box passes no effort (claude's unpinned default, high,
+500s the shim). This is a limit of that shim, not the model: the model serves xhigh over
+the OpenAI route (`reasoning_effort`) that codex and pi profiles use. Once the shim serves
+xhigh, `QWEN_EFFORT_FALLBACK` can fold to xhigh instead.
 
 A codex worker picks its model and endpoint differently: codex configures those through
 profiles, not `ANTHROPIC_*`, so `spawn` takes a `profile` field, carried as

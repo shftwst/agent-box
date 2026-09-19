@@ -366,7 +366,9 @@ def main():
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--max-prompt", type=int, default=8192)
     parser.add_argument("--max-lines", type=int, default=2000)
-    parser.add_argument("--timeout-cap", type=int, default=600000)
+    parser.add_argument("--timeout-cap", type=int, default=1800000,
+                        help="max ask --wait, ms (default 30min; slow local models can take "
+                             "tens of minutes, and read/poll no longer block during a long ask)")
     parser.add_argument("--ready-regex", action="append", default=[], metavar="KIND=REGEX",
                         help="override the readiness pattern for a kind, repeatable. "
                              "Built-in defaults cover claude and codex.")
