@@ -405,7 +405,42 @@ cage_setup_workers() {
     env_args+=(-e "CAGE_WORKER_SOCKET=/tmp/box-worker.sock")
   fi
 
+  _CAGE_WORKERS_ACTIVE=1
+  _CAGE_WORKER_KINDS="$kinds"
   log "workers enabled: box-worker spawn/ask/read/poll/close/list, kinds ${kinds}"
+}
+
+# Brief injected into the orchestrator's harness instructions when workers are
+# active, so it knows box-worker exists and what local models it can point a
+# worker at, without being told each session. The model catalogue is a curated
+# host file (WORKER_MODELS_FILE); its absence just omits that section.
+WORKER_MODELS_FILE="${WORKER_MODELS_FILE:-${HOME}/.config/agent-box/worker-models.md}"
+
+cage_worker_brief() {
+  cat <<EOF
+
+## Delegating to worker agents
+
+This box was launched with \`--workers\`, so you can open and drive caged
+sub-agents with \`box-worker\` (already on your PATH). A worker is a full caged
+agent; kinds available here: ${_CAGE_WORKER_KINDS}. Use them to delegate
+self-contained subtasks and to run work in parallel.
+
+- \`box-worker spawn <name> [--kind K]\` opens a worker (default kind is the first listed)
+- \`box-worker ask <name> "<text>" [--timeout MS]\` prompts it; returns once it goes idle
+- \`box-worker read <name> [--lines N]\` reads its screen
+- \`box-worker poll <name>\` / \`box-worker list\` for status
+- \`box-worker close <name>\` shuts it down
+
+Names are yours ([a-z][a-z0-9_-]{0,31}) and refer only to workers you created.
+\`ask\` blocks until the worker finishes, then \`read\` its output. Spawning is slow
+(a cold cage), so reuse a worker across asks. Run \`box-worker\` with no args for
+full usage.
+EOF
+  if [[ -f "$WORKER_MODELS_FILE" ]]; then
+    printf '\n'
+    cat "$WORKER_MODELS_FILE"
+  fi
 }
 
 # True when something is listening on a unix socket, so a stale file from a

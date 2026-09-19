@@ -122,6 +122,10 @@ box_stage() {
     cat "$f" >> "${STATE_DIR}/CLAUDE.md"
   done
 
+  # With workers active, tell the orchestrator how to drive them and what local
+  # models it can point them at, so it needn't be told each session.
+  [[ "${_CAGE_WORKERS_ACTIVE:-0}" == 1 ]] && cage_worker_brief >> "${STATE_DIR}/CLAUDE.md"
+
   # Concatenate AGENTS.md the same way into the cage relay (the entrypoint copies
   # it to ~/.agents/AGENTS.md). Skip if the cage couldn't provide a writable relay.
   if [[ -n "$RELAY_DIR" ]]; then
