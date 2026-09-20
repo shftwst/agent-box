@@ -240,6 +240,14 @@ verbs and available kinds, and includes a curated model catalogue if `WORKER_MOD
 (default `~/.config/agent-box/worker-models.md`) exists. It only ever touches the
 per-cage state copy, never a source, repo, or the host's global instruction files.
 
+The broker marks every worker cage with `BOX_WORKER=1` (forwarded into the cage), which
+gates two things. First, claude-box installs a SessionStart hook that feeds
+`~/.agents/AGENTS.md` into context deterministically instead of relying on the model
+obeying CLAUDE.md's "read it"; the hook exits early for a worker, so the 19.7 KB authoring
+guide loads for interactive boxes but not for scoped workers. Second, a worker's
+`~/.claude/skills` is shadowed with an empty tmpfs, keeping the skill descriptions out of a
+worker's system prompt. Both are cage config, not broker protocol.
+
 ## A reduction worth taking first
 
 If workers write findings to files in the project directory, which box and host already

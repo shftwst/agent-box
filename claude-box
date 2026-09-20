@@ -199,6 +199,14 @@ box_stage() {
     log "resolving skill symlinks..."
   fi
 
+  # Workers do not need skills. Shadow ~/.claude/skills with an empty tmpfs so the
+  # 52 skill descriptions stay out of a worker's system prompt. The state dir is
+  # shared with interactive boxes, so shadow it per-container rather than deleting.
+  if [[ -n "${BOX_WORKER:-}" ]]; then
+    override_mounts+=(--tmpfs "${CLAUDE_HOME}/skills")
+    log "worker: skills shadowed (empty)"
+  fi
+
   # Sync Claude OAuth credentials into the state dir, newer-wins by expiresAt. On
   # macOS the canonical source is the Keychain ("Claude Code-credentials");
   # ~/.claude/.credentials.json often holds only MCP OAuth state, so trusting the
@@ -241,6 +249,18 @@ box_stage() {
   cat > "$_sync_js" <<'JSEOF'
 const fs = require('fs');
 const [,, mode, src, dst] = process.argv;
+if (mode === 'ensurehook') {
+  // Deterministically feed ~/.agents/AGENTS.md into context at session start,
+  // instead of relying on the model obeying CLAUDE.md's "go read it". Workers
+  // are exempt via BOX_WORKER (the broker sets it, libcage forwards it).
+  let cur = {};
+  try { cur = JSON.parse(fs.readFileSync(dst, 'utf8')); } catch {}
+  cur.hooks = cur.hooks || {};
+  cur.hooks.SessionStart = [{ hooks: [{ type: 'command',
+    command: '[ -n "$BOX_WORKER" ] && exit 0; cat "$HOME/.agents/AGENTS.md" 2>/dev/null' }] }];
+  fs.writeFileSync(dst, JSON.stringify(cur, null, 2));
+  process.exit(0);
+}
 const s = JSON.parse(fs.readFileSync(src, 'utf8'));
 if (mode === 'passthrough') {
   s.bypassPermissionsModeAccepted = true;
@@ -277,6 +297,10 @@ JSEOF
   if [[ -f "$HOST_SETTINGS" && -f "$STATE_SETTINGS" ]]; then
     node "$_sync_js" statusline "$HOST_SETTINGS" "$STATE_SETTINGS"
   fi
+  # Always (re)install the SessionStart AGENTS.md hook, regardless of whether the
+  # host settings were re-synced this launch, so the guide is delivered
+  # deterministically rather than by model compliance.
+  node "$_sync_js" ensurehook "" "$STATE_SETTINGS"
   local HOST_CLAUDE_JSON="${HOME}/.claude.json"
   if [[ -f "$HOST_CLAUDE_JSON" ]] && { [[ ! -f "$STATE_CLAUDE_JSON" ]] || [[ "$HOST_CLAUDE_JSON" -nt "$STATE_CLAUDE_JSON" ]]; }; then
     node "$_sync_js" passthrough "$HOST_CLAUDE_JSON" "$STATE_CLAUDE_JSON"

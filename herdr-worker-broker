@@ -192,6 +192,9 @@ class Broker:
         env_args = self._worker_env(req)
         effort = self._worker_effort(req, env_args)
         profile = self._worker_profile(req, env_args)
+        # Mark the cage as a broker worker so in-cage hooks can gate on it
+        # (e.g. exempt workers from the authoring-guide injection).
+        env_args += ["--env", "BOX_WORKER=1"]
 
         # Reserve the name and split off the dock tail under the lock. The split
         # is quick; the readiness wait below is minutes long and must run unlocked
