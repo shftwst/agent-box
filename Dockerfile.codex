@@ -5,5 +5,9 @@ FROM cage-base
 # and the generic dev tooling. Auth is a persisted ~/.codex login synced by the
 # launcher; the harness runs with --dangerously-bypass-approvals-and-sandbox
 # because the cage is the isolation boundary.
-RUN npm install -g @openai/codex@latest \
+# Codex CLI. Defaults to the current npm release at build time. Docker caches
+# this layer, so `codex-box --upgrade` passes an explicit CODEX_VERSION to bust
+# it and pull the latest; without that the version would freeze at first build.
+ARG CODEX_VERSION=latest
+RUN npm install -g @openai/codex@${CODEX_VERSION} \
     && npm cache clean --force

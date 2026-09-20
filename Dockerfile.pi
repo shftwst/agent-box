@@ -7,5 +7,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest \
+# Pi coding agent. Defaults to the current npm release at build time. Docker
+# caches this layer, so `pi-box --upgrade` passes an explicit PI_VERSION to bust
+# it and pull the latest; without that the version would freeze at first build.
+ARG PI_VERSION=latest
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
     && npm cache clean --force

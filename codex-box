@@ -61,6 +61,23 @@ source "${BOX_SRC_DIR}/libcage.sh"
 
 # --- payload hooks ---
 
+# --- box_upgrade: --upgrade hook (after the repo pull). Pin the Codex CLI to the
+# current npm release and force a payload rebuild, so the cached install layer is
+# replaced. Offline (npm view empty) falls back to @latest, which is a no-op since
+# there is nothing to fetch anyway.
+box_upgrade() {
+  local latest
+  latest=$(npm view @openai/codex version 2>/dev/null)
+  if [[ -n "$latest" ]]; then
+    log "pinning Codex ${latest}"
+    BOX_BUILD_ARGS+=("CODEX_VERSION=${latest}")
+  else
+    warn "could not resolve the latest Codex version; rebuilding with @latest"
+    BOX_BUILD_ARGS+=("CODEX_VERSION=latest")
+  fi
+  FORCE_PAYLOAD_BUILD=1
+}
+
 # Extract every "Codex MCP Credentials" Keychain entry (macOS) and rewrite it as
 # ${STATE_DIR}/.credentials.json in the file format the box reads. The Keychain
 # stores a StoredOAuthTokens JSON keyed by the store key (== the Keychain account

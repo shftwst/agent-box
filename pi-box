@@ -73,4 +73,23 @@ BOX_PAYLOAD_CMD=(pi)
 # shellcheck source=libcage.sh
 source "${BOX_SRC_DIR}/libcage.sh"
 
+# --- payload hooks ---
+
+# --- box_upgrade: --upgrade hook (after the repo pull). Pin the Pi coding agent
+# to the current npm release and force a payload rebuild, so the cached install
+# layer is replaced. Offline (npm view empty) falls back to @latest, which is a
+# no-op since there is nothing to fetch anyway.
+box_upgrade() {
+  local latest
+  latest=$(npm view @earendil-works/pi-coding-agent version 2>/dev/null)
+  if [[ -n "$latest" ]]; then
+    log "pinning Pi ${latest}"
+    BOX_BUILD_ARGS+=("PI_VERSION=${latest}")
+  else
+    warn "could not resolve the latest Pi version; rebuilding with @latest"
+    BOX_BUILD_ARGS+=("PI_VERSION=latest")
+  fi
+  FORCE_PAYLOAD_BUILD=1
+}
+
 cage_run "$@"
