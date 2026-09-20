@@ -83,6 +83,23 @@ _cred_expiry() {
   node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(String((j.claudeAiOauth&&j.claudeAiOauth.expiresAt)||0))}catch{process.stdout.write("0")}})' 2>/dev/null || printf 0
 }
 
+# --- box_upgrade: --upgrade hook (after the repo pull). Pin Claude Code to the
+# current npm release and force a payload rebuild, so the cached install layer is
+# replaced. Offline (npm view empty) falls back to @latest, which is a no-op since
+# there is nothing to fetch anyway.
+box_upgrade() {
+  local latest
+  latest=$(npm view @anthropic-ai/claude-code version 2>/dev/null)
+  if [[ -n "$latest" ]]; then
+    log "pinning Claude Code ${latest}"
+    BOX_BUILD_ARGS+=("CLAUDE_CODE_VERSION=${latest}")
+  else
+    warn "could not resolve the latest Claude Code version; rebuilding with @latest"
+    BOX_BUILD_ARGS+=("CLAUDE_CODE_VERSION=latest")
+  fi
+  FORCE_PAYLOAD_BUILD=1
+}
+
 # --- box_stage: everything Claude-specific, run after the cage builds its
 # generic mounts and before the (generic) colima flush. Appends to env_args /
 # override_mounts (cage globals), stages files into STATE_DIR / RELAY_DIR, and

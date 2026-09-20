@@ -569,6 +569,7 @@ cage_build_images() {
   local marker="${HOME}/.claude-box/.built-${BOX_LABEL}"
   need=0
   if ! docker image inspect "$BOX_IMAGE" &>/dev/null; then need=1
+  elif [[ "${FORCE_PAYLOAD_BUILD:-0}" -eq 1 ]]; then need=1
   elif [[ "$BOX_DOCKERFILE" -nt "$marker" || "$cage_marker" -nt "$marker" ]]; then need=1
   else
     # Extra build inputs the payload Dockerfile COPYs (payload-init, theme, ...):
@@ -580,8 +581,12 @@ cage_build_images() {
     done
   fi
   if [[ $need -eq 1 ]]; then
+    # BOX_BUILD_ARGS (wrapper-set "KEY=VALUE" entries) become --build-arg pairs, so
+    # a box can pin its harness version and bust the relevant layer on upgrade.
+    local _bargs=() _ba
+    for _ba in "${BOX_BUILD_ARGS[@]+"${BOX_BUILD_ARGS[@]}"}"; do _bargs+=(--build-arg "$_ba"); done
     log "building ${BOX_LABEL} image..."
-    if ! docker build -f "$BOX_DOCKERFILE" -t "$BOX_IMAGE" "$BOX_SRC_DIR"; then
+    if ! docker build -f "$BOX_DOCKERFILE" "${_bargs[@]+"${_bargs[@]}"}" -t "$BOX_IMAGE" "$BOX_SRC_DIR"; then
       fault image-missing "docker build failed for image '${BOX_IMAGE}'"
       exit 125
     fi
@@ -630,11 +635,12 @@ cage_run() {
 
   if [[ $UPGRADE -eq 1 ]]; then
     log "upgrading ${BOX_LABEL} at ${BOX_SRC_DIR}..."
-    if git -C "$BOX_SRC_DIR" pull --ff-only; then
-      rm -f "$UPDATE_AVAILABLE_FILE"; touch "$UPDATE_CHECK_FILE"; exit 0
-    else
-      exit $?
-    fi
+    git -C "$BOX_SRC_DIR" pull --ff-only || exit $?
+    # Refresh the harness itself (box-specific, e.g. pin the latest claude-code)
+    # and rebuild the images so the new version is baked in, not just the repo.
+    declare -F box_upgrade >/dev/null && box_upgrade
+    cage_build_images
+    rm -f "$UPDATE_AVAILABLE_FILE"; touch "$UPDATE_CHECK_FILE"; exit 0
   fi
   [[ -e "$UPDATE_AVAILABLE_FILE" ]] && log "update available — run '${BOX_LABEL} --upgrade' to pull latest"
   if [[ ! -f "$UPDATE_CHECK_FILE" ]] || [[ -z "$(find "$UPDATE_CHECK_FILE" -mtime -1 2>/dev/null)" ]]; then

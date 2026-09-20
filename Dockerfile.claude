@@ -18,8 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ugrep \
 # Bun (required for Claude Code plugins — claude-hud, etc.)
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 
-# Claude Code (track the current npm release when the image is built)
-RUN npm install -g @anthropic-ai/claude-code@latest \
+# Claude Code. Defaults to the current npm release at build time. Docker caches
+# this layer, so `claude-box --upgrade` passes an explicit CLAUDE_CODE_VERSION to
+# bust it and pull the latest; without that the version would freeze at first build.
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     && npm cache clean --force
 
 # Bake the claude-box theme into the image so it's available regardless of host
