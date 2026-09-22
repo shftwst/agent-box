@@ -783,7 +783,7 @@ cage_run() {
     printf '%s\n' "$CONTAINER_NAME" > "$NAME_FILE" || warn "--name-file: could not write ${NAME_FILE}"
   fi
 
-  docker run --rm "${TTY_FLAGS[@]}" \
+  docker run --rm ${TTY_FLAGS[@]+"${TTY_FLAGS[@]}"} \
     --name "$CONTAINER_NAME" \
     ${BOX_RUN_ARGS[@]+"${BOX_RUN_ARGS[@]}"} \
     -e "HOST_UID=$(id -u)" \
