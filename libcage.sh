@@ -512,8 +512,22 @@ cage_cp_out() {
 # freshly-written host files at mount time. No-op off colima.
 cage_flush_state_to_vm() {
   [[ "${DOCKER_HOST:-}" == */.colima/* ]] || return 0
+  # If box_stage listed exactly the paths it seeded from the host in
+  # CAGE_FLUSH_PATHS, carry only those into the VM, so a multi-GB history of
+  # box-written sessions isn't re-tarred every launch. No list => whole dir (the
+  # safe default for boxes that don't track their seeds). tar aborts on a missing
+  # member, so drop paths that don't exist yet rather than failing the flush.
+  local -a _members=("${CAGE_FLUSH_PATHS[@]+"${CAGE_FLUSH_PATHS[@]}"}")
+  if [[ ${#_members[@]} -gt 0 ]]; then
+    local -a _present=() _m
+    for _m in "${_members[@]}"; do [[ -e "${STATE_DIR}/${_m}" ]] && _present+=("$_m"); done
+    [[ ${#_present[@]} -gt 0 ]] || return 0
+    _members=("${_present[@]}")
+  else
+    _members=(.)
+  fi
   log "flushing state for colima..."
-  tar --no-xattrs -cf - -C "${STATE_DIR}" . 2>/dev/null \
+  tar --no-xattrs -cf - -C "${STATE_DIR}" "${_members[@]}" 2>/dev/null \
     | docker run --rm -i --entrypoint tar -v "${STATE_DIR}:/_state" "${CAGE_IMAGE}" --no-same-owner -xf - -C /_state 2>/dev/null || true
 }
 

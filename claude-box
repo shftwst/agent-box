@@ -361,6 +361,20 @@ JSEOF
           cp -ru "${CLAUDE_HOME}/${_seed_sat}/." "${STATE_DIR}/${_seed_sat}/" 2>/dev/null || true
       fi
     done
+
+    # Scope the cage's flush to just what we seeded from the host above, plus the
+    # config/relay written earlier this run. The projects/ tree accumulates every
+    # project's sessions across runs (multi-GB), and re-tarring all of it into the
+    # VM each launch is the startup cost. Only this project's slice is host-seeded;
+    # the rest is box-written and already coherent in the VM. Keep this list in
+    # step with the seeds above and the config writes earlier in box_stage.
+    CAGE_FLUSH_PATHS=(
+      CLAUDE.md settings.json .claude.json .credentials.json .mcp.json
+      plugins skills hooks
+      "projects/${PROJECT_SLUG}"
+      tasks session-env shell-snapshots paste-cache plans file-history
+      .cage-relay
+    )
   fi
 
   # Mount .claude.json (main state) at the home dir level.
