@@ -126,6 +126,7 @@ These box flags are consumed by the wrapper before `claude` sees them, and are p
 - `--engine <mode>`: nested container engine posture: `auto` (default), `sysbox`, `rootless`, `privileged-dind`, `none`. See [Nested container engine](#nested-container-engine).
 - `--name <name>`: name the box's container (default `claude-box-<project>-<pid>`), so a caller can address it with `docker stop` / `docker exec`. Must match docker's charset `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
 - `--name-file <path>`: write the resolved container name to `<path>` just before launch (removed on exit), so a headless supervisor can discover the box and stop it.
+- `--sessions <n>`: on colima, seed and flush only the `n` most-recent session transcripts of the current project instead of its whole history. Speeds up startup for a project whose session/workflow history has grown to gigabytes. Older transcripts stay on disk in the state dir and remain resumable; they are just not re-copied from the host or re-flushed each launch. Also settable as `CLAUDE_BOX_MAX_SESSIONS`.
 
 ### Codex
 
