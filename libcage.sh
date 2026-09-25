@@ -81,6 +81,7 @@ UPGRADE=0
 ENGINE_MODE=""
 BOX_NAME=""
 NAME_FILE=""
+IMAGE_OVERRIDE=""
 declare -a _passthrough=()
 cage_parse_args() {
   while [[ $# -gt 0 ]]; do
@@ -102,6 +103,10 @@ cage_parse_args() {
         shift; NAME_FILE="${1:-}"
         [[ -n "$NAME_FILE" ]] || { printf '[%s] --name-file requires a path\n' "$BOX_LABEL" >&2; exit 1; } ;;
       --name-file=*) NAME_FILE="${1#*=}" ;;
+      --image)
+        shift; IMAGE_OVERRIDE="${1:-}"
+        [[ -n "$IMAGE_OVERRIDE" ]] || { printf '[%s] --image requires an image tag\n' "$BOX_LABEL" >&2; exit 1; } ;;
+      --image=*) IMAGE_OVERRIDE="${1#*=}" ;;
       *)
         _CONSUMED=0
         if declare -F box_parse_arg >/dev/null && box_parse_arg "$@"; then
@@ -695,6 +700,23 @@ cage_run() {
   if [[ -f "$proj_env" ]]; then
     set -a; # shellcheck disable=SC1090
     source "$proj_env"; set +a
+  fi
+
+  # Optional payload image override: run a project-built image instead of the
+  # default box image, so a project can bake its own deps (a JDK, custom tooling)
+  # into an image FROM ${BOX_IMAGE}. --image wins over ${PREFIX}_IMAGE (settable in
+  # .env.<label>). This repo owns only the launch; building and rebuilding the
+  # image is the project's job, and it MUST descend FROM ${BOX_IMAGE} so the cage
+  # entrypoint and env contract still hold.
+  local _img_var="${BOX_ENV_PREFIX}_IMAGE" _img="${IMAGE_OVERRIDE:-}"
+  [[ -n "$_img" ]] || _img="${!_img_var:-}"
+  if [[ -n "$_img" && "$_img" != "$BOX_IMAGE" ]]; then
+    if ! docker image inspect "$_img" >/dev/null 2>&1; then
+      fault image-missing "image override '${_img}' not found; build it FROM ${BOX_IMAGE} first (this repo does not build project images)"
+      exit 125
+    fi
+    log "using project image '${_img}' (override; must descend FROM ${BOX_IMAGE})"
+    BOX_IMAGE="$_img"
   fi
 
   cage_resolve_engine

@@ -127,6 +127,51 @@ These box flags are consumed by the wrapper before `claude` sees them, and are p
 - `--name <name>`: name the box's container (default `claude-box-<project>-<pid>`), so a caller can address it with `docker stop` / `docker exec`. Must match docker's charset `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
 - `--name-file <path>`: write the resolved container name to `<path>` just before launch (removed on exit), so a headless supervisor can discover the box and stop it.
 - `--sessions <n>`: on colima, seed and flush only the `n` most-recent session transcripts of the current project instead of its whole history. Speeds up startup for a project whose session/workflow history has grown to gigabytes. Older transcripts stay on disk in the state dir and remain resumable; they are just not re-copied from the host or re-flushed each launch. Also settable as `CLAUDE_BOX_MAX_SESSIONS`.
+- `--image <tag>`: run a project-built image instead of the default box image, so a project can bake its own dependencies (a JDK, a toolchain) into a layer. Also settable as `CLAUDE_BOX_IMAGE` (typically in `.env.claude-box`). The image must be built `FROM claude-box` so the cage entrypoint and env contract still hold. See [Baking project dependencies](#baking-project-dependencies).
+
+#### Baking project dependencies
+
+The box image carries the agent and generic tooling, not per-project SDKs. If a project needs something baked in (a specific JDK, a language toolchain), the project builds its own image `FROM claude-box` and tells the box to run that image instead of the default. The box supplies the base image and runs whatever you point it at; building and rebuilding the project image is the project's job.
+
+Three steps, run from the project's own directory:
+
+**1. Add a Dockerfile to the project** (anywhere in the project; `.claude-box/Dockerfile` is a tidy spot). It must start `FROM claude-box` so it inherits the cage entrypoint, the nested engine, and the whole launch contract, then add whatever the project needs:
+
+```dockerfile
+# my-java-project/.claude-box/Dockerfile
+FROM claude-box
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jdk \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+The base `claude-box` image has to exist first; it is built the first time you ever run `claude-box`. If you have never launched the box on this machine, run `claude-box` once (in any directory) before step 2.
+
+**2. Build the project image**, giving it a tag of your choosing:
+
+```bash
+docker build -f .claude-box/Dockerfile -t claude-box-myproj .
+```
+
+**3. Launch the box on that image.** Either set it once for the project in `.env.claude-box` so you can then run `claude-box` normally:
+
+```bash
+# my-java-project/.env.claude-box
+CLAUDE_BOX_IMAGE=claude-box-myproj
+```
+
+or pass it per-run:
+
+```bash
+claude-box --image claude-box-myproj
+```
+
+Inside the box the JDK is now on `PATH`, and everything else (mounts, auth, sessions) works exactly as usual.
+
+If the tag doesn't exist, the box refuses to launch and tells you to build it first, rather than silently falling back to the default image.
+
+**Rebuild after upgrades.** `claude-box --upgrade` rebuilds the base `claude-box` image, which leaves your project image built on top of the old base. Re-run step 2 after an upgrade to pick up the new base. The box can't do this for you, because it doesn't own the project's Dockerfile.
+
+The same applies to `codex-box` and `pi-box`: build `FROM codex-box` / `FROM pi-box` and use `--image` or `CODEX_BOX_IMAGE` / `PI_BOX_IMAGE`.
 
 ### Codex
 
