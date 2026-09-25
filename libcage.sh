@@ -526,8 +526,13 @@ cage_flush_state_to_vm() {
   else
     _members=(.)
   fi
+  # CAGE_FLUSH_EXCLUDES (tar globbing patterns) drop box-owned paths a box never
+  # seeds from the host, e.g. sqlite DBs the box maintains itself. They're already
+  # coherent in the VM, so re-tarring them wastes the copy.
+  local -a _excl=() _e
+  for _e in "${CAGE_FLUSH_EXCLUDES[@]+"${CAGE_FLUSH_EXCLUDES[@]}"}"; do _excl+=(--exclude="$_e"); done
   log "flushing state for colima..."
-  tar --no-xattrs -cf - -C "${STATE_DIR}" "${_members[@]}" 2>/dev/null \
+  tar --no-xattrs ${_excl[@]+"${_excl[@]}"} -cf - -C "${STATE_DIR}" "${_members[@]}" 2>/dev/null \
     | docker run --rm -i --entrypoint tar -v "${STATE_DIR}:/_state" "${CAGE_IMAGE}" --no-same-owner -xf - -C /_state 2>/dev/null || true
 }
 

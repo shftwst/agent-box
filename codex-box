@@ -200,6 +200,12 @@ box_stage() {
     fi
   fi
 
+  # Keep the colima flush from re-tarring codex's own runtime databases into the
+  # VM every launch. box_stage seeds ~/.codex from the host but excludes these
+  # (the box maintains its own sqlite DBs across runs), so they are box-written
+  # and already coherent in the VM. Same patterns as the seed's rsync excludes.
+  CAGE_FLUSH_EXCLUDES=('*.sqlite' '*.sqlite-wal' '*.sqlite-shm' './db-backups')
+
   # Lift MCP OAuth logins (Linear, etc.) out of the macOS Keychain into the
   # file the box reads. Standard Codex stores them under Keychain service
   # "Codex MCP Credentials" (Auto mode), which a Linux box can't read; the box
