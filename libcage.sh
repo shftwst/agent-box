@@ -695,12 +695,16 @@ cage_run() {
   trap 'cage_sync_back; cage_cleanup' EXIT
   trap 'exit' INT TERM HUP
 
-  # Per-project overrides from ${PROJECT_DIR}/.env.<label>.
-  local proj_env="${PROJECT_DIR}/.env.${BOX_LABEL}"
-  if [[ -f "$proj_env" ]]; then
-    set -a; # shellcheck disable=SC1090
-    source "$proj_env"; set +a
-  fi
+  # Per-project overrides. A shared .env.agent-box applies to every box (one file
+  # for keys/config common to claude/codex/pi/...); the per-label .env.<label> is
+  # sourced after, so a box-specific value wins over the shared one on conflict.
+  local _ef
+  for _ef in "${PROJECT_DIR}/.env.agent-box" "${PROJECT_DIR}/.env.${BOX_LABEL}"; do
+    if [[ -f "$_ef" ]]; then
+      set -a; # shellcheck disable=SC1090
+      source "$_ef"; set +a
+    fi
+  done
 
   # Optional payload image override: run a project-built image instead of the
   # default box image, so a project can bake its own deps (a JDK, custom tooling)
@@ -730,6 +734,7 @@ cage_run() {
     ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
     BOX_WORKER
     "${BOX_FORWARD_VARS[@]+"${BOX_FORWARD_VARS[@]}"}"
+    "${AGENT_BOX_EXTRA_VARS[@]+"${AGENT_BOX_EXTRA_VARS[@]}"}"
   )
   # Append the array named by $extra_vars_name (dynamic name). bash 3.2 has no
   # namerefs, so indirect via eval, guarded so an unset var is a no-op under set -u.
@@ -784,6 +789,11 @@ cage_run() {
   if eval "[ -n \"\${${extra_mounts_name}[*]+x}\" ]" 2>/dev/null; then
     eval "for spec in \"\${${extra_mounts_name}[@]}\"; do override_mounts+=( -v \"\$spec\" ); done"
   fi
+  # Shared, label-agnostic mounts from .env.agent-box (fixed name, no eval needed).
+  local _mspec
+  for _mspec in "${AGENT_BOX_EXTRA_MOUNTS[@]+"${AGENT_BOX_EXTRA_MOUNTS[@]}"}"; do
+    override_mounts+=(-v "$_mspec")
+  done
 
   # Payload staging: its own mounts, relay files (AGENTS.md), state seeding.
   declare -F box_stage >/dev/null && box_stage

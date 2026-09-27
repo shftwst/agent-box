@@ -290,7 +290,23 @@ LINEAR_API_KEY=lin_proj_specific_xxx
 TURSO_AUTH_TOKEN=ey...
 ```
 
-Plain `KEY=value` lines work, with no `export` needed. Add `.env.claude-box` to `.gitignore` (or rely on your global `.env.*` ignore) since it holds secrets. The other boxes read their own `.env.<box>` file the same way (`.env.codex-box`, `.env.deepseek-box`, `.env.pi-box`).
+Plain `KEY=value` lines work, with no `export` needed. These files hold secrets, so keep them out of git: a single `.env.*-box` line in `.gitignore` (or your global `.env.*` ignore) covers every box file. Each box reads its own `.env.<box>` the same way (`.env.codex-box`, `.env.deepseek-box`, `.env.pi-box`), plus the shared `.env.agent-box` described below.
+
+#### Shared values across boxes via `.env.agent-box`
+
+Each box reads only its own `.env.<box>` file, so a key in `.env.claude-box` is invisible to codex-box. To share one set of values across every box in a project, put them in `.env.agent-box`. Every box sources it, then sources its own `.env.<box>` on top, so a box-specific value overrides the shared one:
+
+```bash
+# .env.agent-box (shared by all boxes in this project, gitignored)
+OPENROUTER_API_KEY=sk-or-...
+GEMINI_API_KEY=...
+AGENT_BOX_EXTRA_VARS=(OPENROUTER_API_KEY GEMINI_API_KEY)   # forwarded by every box
+
+# .env.codex-box (codex only; wins on conflict)
+OPENROUTER_API_KEY=sk-or-codex-specific-...
+```
+
+`AGENT_BOX_EXTRA_VARS` (and `AGENT_BOX_EXTRA_MOUNTS`) work like the per-box `*_EXTRA_VARS` / `*_EXTRA_MOUNTS`, but apply to all boxes. They're additive with the per-box arrays, so a box gets both. In a per-box file, use that box's prefixed array name (`CODEX_BOX_EXTRA_VARS`), not `AGENT_BOX_EXTRA_VARS` again, or you'll replace the shared list instead of extending it.
 
 ### Running multiple boxes at once (Claude auth)
 
