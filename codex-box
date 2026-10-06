@@ -18,6 +18,7 @@
 #
 # codex-box-specific flags (consumed before codex sees them; position-free):
 #   --no-ssh / --upgrade / --engine <mode> / --name <name> / --name-file <path>
+#   --sessions <n> / --no-sync
 # — identical to claude-box; see libcage.sh and the README.
 #
 # Installation:
@@ -175,36 +176,60 @@ JSEOF
   rm -f "$xform"
 }
 
+# Host sessions (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) are global, not
+# per project. All history seeds every one; with a limit, the newest N whose
+# session_meta (first line) records this project as its cwd. Box-written
+# sessions stay in the box.
+_codex_seed_sessions() {
+  local _r
+  if [[ -z "$MAX_SESSIONS" ]]; then
+    cage_seed "$CODEX_HOME_HOST" sessions -u
+  elif (( MAX_SESSIONS > 0 )); then
+    log "seeding the ${MAX_SESSIONS} most recent host sessions of this project..."
+    while IFS= read -r _r; do
+      cage_seed "$CODEX_HOME_HOST" "${_r#"${CODEX_HOME_HOST}/"}" -u
+    done < <(
+      find "${CODEX_HOME_HOST}/sessions" -name 'rollout-*.jsonl' -type f -exec ls -t {} + 2>/dev/null \
+        | while IFS= read -r _r; do
+            head -n 1 "$_r" | grep -qF "\"cwd\":\"${PROJECT_DIR}\"" && printf '%s\n' "$_r"
+          done \
+        | head -n "$MAX_SESSIONS"
+    )
+  elif [[ -n "$NO_SYNC" ]]; then
+    log "session sync off (--no-sync): no host history seeded"
+  else
+    log "no session history seeded${BOX_WORKER:+ (worker default)}"
+  fi
+}
+
 # Seed the host's ~/.codex (login, config, sessions) into the state dir so a
 # host `codex login` is reused in the box; newer-wins (no --delete) so an
 # in-box-newer login isn't clobbered by a stale host copy. Also build the merged
 # AGENTS.md into the cage relay — Codex reads AGENTS.md natively.
 box_stage() {
+  local CODEX_HOME_HOST="${HOME}/.codex"
   # Seed login/config from the host, but NEVER Codex's local runtime database.
   # logs_*.sqlite is kept open (WAL) by a running host codex, so copying it
   # in-flight yields a torn file ("file is not a database"), which the box then
   # rebuilds on every startup. The box keeps its OWN sqlite in the state dir
   # across runs; only auth.json / config.toml / profiles come from the host.
-  if [[ -d "${HOME}/.codex" ]]; then
+  # Sessions are seeded separately below, per the session history mode.
+  if [[ -d "$CODEX_HOME_HOST" ]]; then
     log "seeding ~/.codex login/config..."
     if command -v rsync >/dev/null 2>&1; then
-      rsync -au --exclude='*.sqlite' --exclude='*.sqlite-wal' --exclude='*.sqlite-shm' \
-        --exclude='db-backups/' "${HOME}/.codex/" "${STATE_DIR}/" 2>/dev/null || true
+      cage_seed "$CODEX_HOME_HOST" . -u --exclude='*.sqlite' --exclude='*.sqlite-wal' \
+        --exclude='*.sqlite-shm' --exclude='db-backups/' --exclude='/sessions/'
+      _codex_seed_sessions
     else
       # Minimal fallback (no rsync): just the config/auth files, never the DB.
       local f
       for f in auth.json config.toml; do
-        [[ -f "${HOME}/.codex/${f}" ]] && cp -pf "${HOME}/.codex/${f}" "${STATE_DIR}/${f}" 2>/dev/null || true
+        [[ -f "${CODEX_HOME_HOST}/${f}" ]] && cp -pf "${CODEX_HOME_HOST}/${f}" "${STATE_DIR}/${f}" 2>/dev/null || true
       done
-      cp -pf "${HOME}/.codex/"*.config.toml "${STATE_DIR}/" 2>/dev/null || true
+      cp -pf "${CODEX_HOME_HOST}/"*.config.toml "${STATE_DIR}/" 2>/dev/null || true
+      CAGE_FLUSH_PATHS+=(auth.json config.toml)
     fi
   fi
-
-  # Keep the colima flush from re-tarring codex's own runtime databases into the
-  # VM every launch. box_stage seeds ~/.codex from the host but excludes these
-  # (the box maintains its own sqlite DBs across runs), so they are box-written
-  # and already coherent in the VM. Same patterns as the seed's rsync excludes.
-  CAGE_FLUSH_EXCLUDES=('*.sqlite' '*.sqlite-wal' '*.sqlite-shm' './db-backups')
 
   # Lift MCP OAuth logins (Linear, etc.) out of the macOS Keychain into the
   # file the box reads. Standard Codex stores them under Keychain service
@@ -212,6 +237,7 @@ box_stage() {
   # is forced to file mode, so seed ${CODEX_HOME}/.credentials.json from the
   # Keychain here — no re-login. Mirrors claude-box's Keychain credential lift.
   _codex_seed_mcp_from_keychain
+  CAGE_FLUSH_PATHS+=(.credentials.json)
 
   # Merged AGENTS.md: global ~/.agents/AGENTS.md -> parent dirs -> project.
   # Skip if the cage couldn't provide a writable relay dir (see cage_stage_gitconfig).

@@ -37,9 +37,20 @@
 #   box_stage            after the generic mounts are built: append to
 #                        override_mounts / env_args, stage relay files, seed
 #                        state. Sees STATE_DIR, PROJECT_DIR, PROJECT_SLUG, etc.
+#                        Seed host files with cage_seed; add any other file it
+#                        writes into STATE_DIR to CAGE_FLUSH_PATHS, or a colima
+#                        VM may not see it. Honour MAX_SESSIONS (empty = all
+#                        history, N = newest N, 0 = none) and NO_SYNC when
+#                        seeding session history.
 #   box_sync_back        from the EXIT trap after the container stops: copy
-#                        payload state back to the host. Use cage_cp_out for the
-#                        colima path.
+#                        payload state back to the host. Use cage_cp_out (or
+#                        cage_cp_out_since for files written this run) for the
+#                        colima path; skip session history when NO_SYNC is set.
+#
+# Session history flags (generic, so every box takes them):
+#   --sessions <n> / ${PREFIX}_MAX_SESSIONS   seed only the newest n sessions
+#   --no-sync      / ${PREFIX}_NO_SYNC=1      no session history in or out
+# Workers (BOX_WORKER) default to --sessions 0.
 
 # ---------------------------------------------------------------------------
 # Logging — identical contract to the monolith.
@@ -82,6 +93,8 @@ ENGINE_MODE=""
 BOX_NAME=""
 NAME_FILE=""
 IMAGE_OVERRIDE=""
+MAX_SESSIONS=""
+NO_SYNC=""
 declare -a _passthrough=()
 cage_parse_args() {
   while [[ $# -gt 0 ]]; do
@@ -107,6 +120,13 @@ cage_parse_args() {
         shift; IMAGE_OVERRIDE="${1:-}"
         [[ -n "$IMAGE_OVERRIDE" ]] || { printf '[%s] --image requires an image tag\n' "$BOX_LABEL" >&2; exit 1; } ;;
       --image=*) IMAGE_OVERRIDE="${1#*=}" ;;
+      --sessions|--max-sessions)
+        shift; MAX_SESSIONS="${1:-}"
+        [[ "$MAX_SESSIONS" =~ ^[0-9]+$ ]] || { printf '[%s] --sessions requires a number\n' "$BOX_LABEL" >&2; exit 1; } ;;
+      --sessions=*|--max-sessions=*)
+        MAX_SESSIONS="${1#*=}"
+        [[ "$MAX_SESSIONS" =~ ^[0-9]+$ ]] || { printf '[%s] --sessions requires a number\n' "$BOX_LABEL" >&2; exit 1; } ;;
+      --no-sync) NO_SYNC=1 ;;
       *)
         _CONSUMED=0
         if declare -F box_parse_arg >/dev/null && box_parse_arg "$@"; then
@@ -172,6 +192,24 @@ _resolve_userns_strategy() {
     s="cap"
   fi
   if [[ -n "$s" ]]; then echo "$s" > "$cache"; echo "$s"; else echo "unsupported"; fi
+}
+
+# Session history: --no-sync > --sessions > worker (none) > ${PREFIX}_NO_SYNC >
+# ${PREFIX}_MAX_SESSIONS > all. Runs after the .env files load so they can set it.
+cage_resolve_history() {
+  if [[ -z "$NO_SYNC" && -z "$MAX_SESSIONS" ]]; then
+    if [[ -n "${BOX_WORKER:-}" ]]; then
+      MAX_SESSIONS=0
+    else
+      local nosync_var="${BOX_ENV_PREFIX}_NO_SYNC" max_var="${BOX_ENV_PREFIX}_MAX_SESSIONS"
+      NO_SYNC="${!nosync_var:-}"
+      MAX_SESSIONS="${!max_var:-}"
+    fi
+  fi
+  [[ -z "$NO_SYNC" ]] || MAX_SESSIONS=0
+  [[ -z "$MAX_SESSIONS" || "$MAX_SESSIONS" =~ ^[0-9]+$ ]] \
+    || { printf '[%s] %s_MAX_SESSIONS must be a number\n' "$BOX_LABEL" "$BOX_ENV_PREFIX" >&2; exit 1; }
+  [[ -z "$MAX_SESSIONS" ]] || MAX_SESSIONS=$((10#$MAX_SESSIONS))
 }
 
 # Resolve ENGINE from ENGINE_MODE (CLI) / ${PREFIX}_ENGINE_MODE / auto, then
@@ -503,6 +541,57 @@ cage_stage_gitconfig() {
   [[ -f "${HOME}/.gitconfig" ]] && cp -f "${HOME}/.gitconfig" "${RELAY_DIR}/gitconfig" 2>/dev/null || true
 }
 
+# cage_mount_once <dir> [mode]: bind-mount <dir> at its host path unless the
+# project mount already shows it or it is already mounted (Docker rejects
+# duplicate mount points).
+cage_mount_once() {
+  local m
+  [[ "$1" != "$PROJECT_DIR" && "$1" != "$PROJECT_DIR"/* ]] || return 0
+  for m in "${override_mounts[@]+"${override_mounts[@]}"}"; do
+    [[ "$m" != "${1}:${1}" && "$m" != "${1}:${1}:"* ]] || return 0
+  done
+  override_mounts+=(-v "${1}:${1}${2:+:$2}")
+}
+
+# cage_mount_link_targets <mode> <dir>...: bind-mount, at their host paths, the
+# parent dirs of the symlinks directly inside each <dir>, so links that point
+# outside the mounted tree (e.g. skills linked from a repo checkout) resolve.
+cage_mount_link_targets() {
+  local mode="$1" dir
+  shift
+  while IFS= read -r dir; do
+    cage_mount_once "$dir" "$mode"
+  done < <(
+    find "$@" -maxdepth 1 -type l 2>/dev/null | while IFS= read -r link; do
+      target=$(readlink "$link") || continue
+      [[ "$target" == /* ]] || target="$(dirname "$link")/${target}"
+      (cd "$(dirname "$target")" 2>/dev/null && pwd)
+    done | sort -u
+  )
+}
+
+# Shared agent config: ~/.agents (AGENTS.md, skills, style guides) read-only at
+# its host path, plus the targets of its linked skills. The payload's merged AGENTS.md
+# (global + project chain, staged in the relay) shadows ~/.agents/AGENTS.md
+# read-only, so the box sees the merge and can never overwrite the host file.
+# Workers get an empty skills dir, as with ~/.claude/skills.
+cage_mount_agents() {
+  local agents="${HOME}/.agents" merged="${RELAY_DIR:+${RELAY_DIR}/AGENTS.md}"
+  if [[ -d "$agents" ]]; then
+    cage_mount_once "$agents" ro
+    if [[ -n "${BOX_WORKER:-}" ]]; then
+      [[ ! -d "${agents}/skills" ]] || override_mounts+=(--tmpfs "${agents}/skills")
+    else
+      cage_mount_link_targets ro "$agents" "${agents}/skills"
+    fi
+  fi
+  # Without a host AGENTS.md, Docker would create an empty one on the host as the
+  # mount point; the harness still reads the project's AGENTS.md natively.
+  if [[ -s "$merged" ]] && { [[ ! -d "$agents" ]] || [[ -f "${agents}/AGENTS.md" ]]; }; then
+    override_mounts+=(-v "${merged}:${agents}/AGENTS.md:ro")
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Colima helpers, used by cage_sync_back / box_sync_back.
 _CID=""
@@ -513,32 +602,60 @@ cage_cp_out() {
   docker cp "${_CID}:/_state/${1}" "${STATE_DIR}/${1}" 2>/dev/null || true
 }
 
-# Flush the whole state dir into the colima VM through docker I/O so the VM sees
-# freshly-written host files at mount time. No-op off colima.
+# cage_cp_out_since <rel>...: on colima pull out only the files under these state
+# paths written since this run's flush stamped the VM (everything if the stamp is
+# missing, e.g. the flush failed). Elsewhere the host already sees the state dir.
+cage_cp_out_since() {
+  [[ "${DOCKER_HOST:-}" == */.colima/* ]] || return 0
+  # The VM's stamp visible on the host means the VM shares the state dir (a
+  # virtiofs home mount): its writes are already here.
+  [[ ! -e "${STATE_DIR}/${CAGE_RUN_STAMP}" ]] || return 0
+  docker run --rm --entrypoint sh -v "${STATE_DIR}:/_state" "${CAGE_IMAGE}" -c '
+    cd /_state || exit 1
+    stamp=$1; shift
+    if [ -f "$stamp" ]; then find "$@" -type f -newer "$stamp" -print0
+    else find "$@" -type f -print0; fi 2>/dev/null | tar --null -T - -cf -
+  ' sh "$CAGE_RUN_STAMP" "$@" 2>/dev/null | tar -xf - -C "${STATE_DIR}" 2>/dev/null || true
+}
+
+# cage_seed <host-root> <rel> [rsync-arg...]: copy <host-root>/<rel> (a file, a
+# dir, or "." for the whole root) into STATE_DIR/<rel> and queue each file rsync
+# actually copied for the colima flush; unchanged files are already in the VM.
+# Pass -u for newer-wins, or -L --delete for an exact mirror.
+cage_seed() {
+  local root="$1" rel="$2" parent="" _f
+  shift 2
+  [[ -e "${root}/${rel}" ]] || return 0
+  [[ "$rel" == . || "$rel" != */* ]] || parent="${rel%/*}/"
+  local src="./${rel##*/}"
+  [[ "$rel" != . ]] || src="./"
+  mkdir -p "${STATE_DIR}/${parent}"
+  while IFS= read -r _f; do
+    [[ -z "$_f" || "$_f" == */ ]] || CAGE_FLUSH_PATHS+=("${parent}${_f}")
+  done < <(cd "${root}/${parent}" && rsync -a --out-format='%n' "$@" "$src" "${STATE_DIR}/${parent}" 2>/dev/null)
+}
+
+# Flush host-written state into the colima VM through docker I/O so the VM sees
+# fresh host files at mount time, and stamp the VM with this run's start (VM
+# clock) for cage_cp_out_since. Only CAGE_FLUSH_PATHS (what box_stage seeded or
+# wrote) plus the cage's own relay and brief go; everything else under the state
+# dir is box-written and already in the VM. No-op off colima.
 cage_flush_state_to_vm() {
   [[ "${DOCKER_HOST:-}" == */.colima/* ]] || return 0
-  # If box_stage listed exactly the paths it seeded from the host in
-  # CAGE_FLUSH_PATHS, carry only those into the VM, so a multi-GB history of
-  # box-written sessions isn't re-tarred every launch. No list => whole dir (the
-  # safe default for boxes that don't track their seeds). tar aborts on a missing
-  # member, so drop paths that don't exist yet rather than failing the flush.
-  local -a _members=("${CAGE_FLUSH_PATHS[@]+"${CAGE_FLUSH_PATHS[@]}"}")
-  if [[ ${#_members[@]} -gt 0 ]]; then
-    local -a _present=() _m
-    for _m in "${_members[@]}"; do [[ -e "${STATE_DIR}/${_m}" ]] && _present+=("$_m"); done
-    [[ ${#_present[@]} -gt 0 ]] || return 0
-    _members=("${_present[@]}")
-  else
-    _members=(.)
-  fi
-  # CAGE_FLUSH_EXCLUDES (tar globbing patterns) drop box-owned paths a box never
-  # seeds from the host, e.g. sqlite DBs the box maintains itself. They're already
-  # coherent in the VM, so re-tarring them wastes the copy.
-  local -a _excl=() _e
-  for _e in "${CAGE_FLUSH_EXCLUDES[@]+"${CAGE_FLUSH_EXCLUDES[@]}"}"; do _excl+=(--exclude="$_e"); done
-  log "flushing state for colima..."
-  tar --no-xattrs ${_excl[@]+"${_excl[@]}"} -cf - -C "${STATE_DIR}" "${_members[@]}" 2>/dev/null \
-    | docker run --rm -i --entrypoint tar -v "${STATE_DIR}:/_state" "${CAGE_IMAGE}" --no-same-owner -xf - -C /_state 2>/dev/null || true
+  local -a _members=(.cage-relay "${CAGE_FLUSH_PATHS[@]+"${CAGE_FLUSH_PATHS[@]}"}") _present=()
+  [[ "${BOX_BRIEF_FILE:-}" != "${STATE_DIR}/"* ]] || _members+=("${BOX_BRIEF_FILE#"${STATE_DIR}/"}")
+  # tar aborts on a missing member, so drop paths that don't exist.
+  local _m
+  for _m in "${_members[@]}"; do [[ -e "${STATE_DIR}/${_m}" ]] && _present+=("$_m"); done
+  [[ ${#_present[@]} -gt 0 ]] || return 0
+  log "flushing state for colima (${#_present[@]} paths)..."
+  # Members go via stdin: a first full seed can list more files than ARG_MAX.
+  { printf '%s\n' "${_present[@]}" | tar --no-xattrs -cf - -C "${STATE_DIR}" -T - 2>/dev/null || true; } \
+    | docker run --rm -i --entrypoint sh -v "${STATE_DIR}:/_state" "${CAGE_IMAGE}" -c '
+        tar --no-same-owner -xf - -C /_state || exit 1
+        mkdir -p /_state/.cage-stamps && touch "/_state/$1"
+        find /_state/.cage-stamps -type f -mtime +7 -delete
+      ' sh "$CAGE_RUN_STAMP" 2>/dev/null || true
 }
 
 _LAUNCHED=0
@@ -691,6 +808,8 @@ cage_run() {
   chmod 777 "$STATE_DIR" 2>/dev/null || true
 
   CONTAINER_NAME="${BOX_NAME:-${BOX_LABEL}-$(basename "$PROJECT_DIR")-$$}"
+  # Per-container, so concurrent boxes on one state dir don't move each other's.
+  CAGE_RUN_STAMP=".cage-stamps/${CONTAINER_NAME}"
 
   trap 'cage_sync_back; cage_cleanup' EXIT
   trap 'exit' INT TERM HUP
@@ -705,6 +824,8 @@ cage_run() {
       source "$_ef"; set +a
     fi
   done
+
+  cage_resolve_history
 
   # Optional payload image override: run a project-built image instead of the
   # default box image, so a project can bake its own deps (a JDK, custom tooling)
@@ -772,6 +893,7 @@ cage_run() {
   fi
 
   override_mounts=()
+  CAGE_FLUSH_PATHS=()
   cage_setup_ssh
   cage_setup_workers
   cage_stage_gitconfig
@@ -803,6 +925,7 @@ cage_run() {
   # markers, so it clears itself when workers are off and never clobbers content.
   [[ -n "${BOX_BRIEF_FILE:-}" ]] && cage_inject_brief "$BOX_BRIEF_FILE"
 
+  cage_mount_agents
   cage_flush_state_to_vm
 
   # Terminal title.

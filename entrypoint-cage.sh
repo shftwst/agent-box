@@ -33,16 +33,12 @@ export PATH="${HOST_HOME}/.local/bin:${PATH}"
 # cage-owned .cage-relay/ inside the state mount (payload-independent: the name
 # is the cage's, not any harness's config file), so the relay rides the same
 # state volume the colima flush already carries. Copy them to the paths the tools
-# expect. Clean up a stale dir if Docker created one at a target.
+# expect. Clean up a stale dir if Docker created one at a target. (The merged
+# AGENTS.md in the relay is bind-mounted at ~/.agents/AGENTS.md by libcage.)
 _RELAY="${CAGE_STATE_MOUNT:-${HOME}/.cage}/.cage-relay"
 if [ -f "${_RELAY}/gitconfig" ]; then
   [ -d "${HOME}/.gitconfig" ] && rm -rf "${HOME}/.gitconfig"
   cp -f "${_RELAY}/gitconfig" "${HOME}/.gitconfig" 2>/dev/null || true
-fi
-if [ -s "${_RELAY}/AGENTS.md" ]; then
-  [ -d "${HOME}/.agents/AGENTS.md" ] && rm -rf "${HOME}/.agents/AGENTS.md"
-  mkdir -p "${HOME}/.agents"
-  cp -f "${_RELAY}/AGENTS.md" "${HOME}/.agents/AGENTS.md" 2>/dev/null || true
 fi
 
 echo "[cage] starting..." >&2
@@ -92,9 +88,16 @@ if [ "$(id -u)" = "0" ] && [ "${HOST_UID}" != "0" ]; then
 
   # Fix ownership on the payload's state tree. The init-container flush and
   # Docker-created mount points leave root-owned entries that cause EACCES when
-  # the harness tries to write sessions, config, etc.
-  if [ -n "${CAGE_STATE_MOUNT:-}" ]; then
-    [ -d "${CAGE_STATE_MOUNT}" ] && chown -R "${HOST_UID}:${HOST_GID}" "${CAGE_STATE_MOUNT}" 2>/dev/null || true
+  # the harness tries to write sessions, config, etc. Only touch entries that are
+  # wrong, and skip the walk entirely where chown doesn't stick (colima's
+  # virtiofs reports every file as root and ignores chown, and walking a large
+  # session history there costs seconds per launch).
+  if [ -n "${CAGE_STATE_MOUNT:-}" ] && [ -d "${CAGE_STATE_MOUNT}" ]; then
+    chown "${HOST_UID}:${HOST_GID}" "${CAGE_STATE_MOUNT}" 2>/dev/null || true
+    if [ "$(stat -c %u "${CAGE_STATE_MOUNT}")" = "${HOST_UID}" ]; then
+      find "${CAGE_STATE_MOUNT}" \( ! -uid "${HOST_UID}" -o ! -gid "${HOST_GID}" \) \
+        -exec chown -h "${HOST_UID}:${HOST_GID}" {} + 2>/dev/null || true
+    fi
   fi
 
   # Payload-specific prep, if the payload image shipped a hook. Runs as root,

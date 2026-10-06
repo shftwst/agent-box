@@ -25,13 +25,13 @@
 #   --ollama <model>            # route Claude Code at an Ollama server's
 #                                 Anthropic-compatible API (base URL from
 #                                 OLLAMA_HOST)
-#   --sessions <n>              # seed/flush only the N most-recent session
-#                                 transcripts of this project (colima startup
-#                                 speed for projects with huge history; older
-#                                 sessions stay on disk and resumable). Also
-#                                 CLAUDE_BOX_MAX_SESSIONS.
 # plus the cage-generic flags (see libcage.sh / README):
 #   --no-ssh / --upgrade / --engine <mode> / --name <name> / --name-file <path>
+#   --sessions <n>              # colima: seed only the N most-recent session
+#                                 transcripts of this project (0 = none). Also
+#                                 CLAUDE_BOX_MAX_SESSIONS. Workers default to 0.
+#   --no-sync                   # colima: no session history in or out. Also
+#                                 CLAUDE_BOX_NO_SYNC=1.
 #
 # Installation:
 #   git clone https://github.com/shftwst/claude-box ~/claude-box
@@ -67,14 +67,14 @@ BOX_PAYLOAD_CMD=(claude --dangerously-skip-permissions)
 BOX_BUILD_INPUTS=("${BOX_SRC_DIR}/payload-init-claude.sh" "${BOX_SRC_DIR}/claude-box-theme.json")
 
 OLLAMA_MODEL=""
-# --sessions N (or CLAUDE_BOX_MAX_SESSIONS): seed and flush only the N most-recent
-# session transcripts of this project, instead of its whole history. Empty = all.
-MAX_SESSIONS="${CLAUDE_BOX_MAX_SESSIONS:-}"
+# Session-keyed state lives in <dir>/<session-id>; the rest is shared.
+KEYED_SATELLITES=(tasks session-env file-history)
+SHARED_SATELLITES=(shell-snapshots paste-cache plans)
 
 # shellcheck source=libcage.sh
 source "${BOX_SRC_DIR}/libcage.sh"
 
-# --- wrapper flags: --ollama <model>, --sessions <n> ---
+# --- wrapper flag: --ollama <model> ---
 box_parse_arg() {
   case "$1" in
     --ollama)
@@ -82,14 +82,6 @@ box_parse_arg() {
       [[ -n "$OLLAMA_MODEL" ]] || { printf '[claude-box] --ollama requires a model name\n' >&2; exit 1; }
       _CONSUMED=2; return 0 ;;
     --ollama=*) OLLAMA_MODEL="${1#*=}"; _CONSUMED=1; return 0 ;;
-    --sessions|--max-sessions)
-      MAX_SESSIONS="${2:-}"
-      [[ "$MAX_SESSIONS" =~ ^[0-9]+$ ]] || { printf '[claude-box] %s requires a number\n' "$1" >&2; exit 1; }
-      _CONSUMED=2; return 0 ;;
-    --sessions=*|--max-sessions=*)
-      MAX_SESSIONS="${1#*=}"
-      [[ "$MAX_SESSIONS" =~ ^[0-9]+$ ]] || { printf '[claude-box] %s requires a number\n' "${1%%=*}" >&2; exit 1; }
-      _CONSUMED=1; return 0 ;;
   esac
   return 1
 }
@@ -206,28 +198,21 @@ box_stage() {
     fi
   done
 
-  # On non-Colima runtimes, overlay-mount host ~/.claude entries on top of the
-  # state dir so the container reflects the host's current setup. On Colima these
-  # mounts silently fail (virtiofs can't see host dirs), so sync into the state
-  # dir instead (below), before the cage's flush.
+  # On non-Colima runtimes, overlay-mount host ~/.claude entries read-only on top
+  # of the state dir so the container reflects the host's current setup but
+  # cannot alter it. On Colima these mounts silently fail (virtiofs can't see host
+  # dirs), so sync into the state dir instead (below), before the cage's flush.
   if [[ "${DOCKER_HOST:-}" != */.colima/* ]]; then
     for entry in plugins skills hooks .mcp.json; do
       if [[ -e "${CLAUDE_HOME}/${entry}" ]]; then
         if [[ -d "${CLAUDE_HOME}/${entry}" ]]; then mkdir -p "${STATE_DIR}/${entry}"; else touch "${STATE_DIR}/${entry}"; fi
-        override_mounts+=(-v "${CLAUDE_HOME}/${entry}:${CLAUDE_HOME}/${entry}:rw")
+        override_mounts+=(-v "${CLAUDE_HOME}/${entry}:${CLAUDE_HOME}/${entry}:ro")
       fi
     done
-    # Symlinked skills point outside ~/.claude; mount their target parent dirs rw
-    # so those paths resolve inside the container.
+    # Symlinked skills point outside ~/.claude; mount their target parent dirs
+    # read-only so those paths resolve inside the container.
     log "resolving skill symlinks..."
-    local dir target
-    while IFS= read -r dir; do
-      [[ -d "$dir" ]] && override_mounts+=(-v "${dir}:${dir}:rw")
-    done < <(
-      find "${CLAUDE_HOME}/skills" -maxdepth 1 -type l 2>/dev/null \
-        | while IFS= read -r link; do target=$(readlink "$link" 2>/dev/null) && dirname "$target"; done \
-        | sort -u
-    )
+    cage_mount_link_targets ro "${CLAUDE_HOME}/skills"
   else
     log "resolving skill symlinks..."
   fi
@@ -353,64 +338,37 @@ JSEOF
   # sessions into the state dir here; the cage's flush (after box_stage) carries
   # it all into the VM.
   if [[ "${DOCKER_HOST:-}" == */.colima/* ]]; then
+    # The settings/credential writes above, plus each host file seeded below.
+    CAGE_FLUSH_PATHS+=(CLAUDE.md settings.json .claude.json .credentials.json)
     log "syncing host config for colima..."
     local _sync_entry
     for _sync_entry in plugins skills hooks; do
-      if [[ -d "${CLAUDE_HOME}/${_sync_entry}" ]]; then
-        mkdir -p "${STATE_DIR}/${_sync_entry}"
-        rsync -aL --delete "${CLAUDE_HOME}/${_sync_entry}/" "${STATE_DIR}/${_sync_entry}/" 2>/dev/null || \
-          cp -rfL "${CLAUDE_HOME}/${_sync_entry}/." "${STATE_DIR}/${_sync_entry}/" 2>/dev/null || true
-      fi
+      cage_seed "$CLAUDE_HOME" "$_sync_entry" -L --delete
     done
-    [[ -f "${CLAUDE_HOME}/.mcp.json" ]] && cp -f "${CLAUDE_HOME}/.mcp.json" "${STATE_DIR}/.mcp.json" 2>/dev/null || true
+    cage_seed "$CLAUDE_HOME" .mcp.json
 
-    log "seeding host sessions for colima..."
-    # With --sessions N (or CLAUDE_BOX_MAX_SESSIONS), seed and flush only the N
-    # most-recent transcripts. A project with gigabytes of accumulated session and
-    # workflow history (mostly box-written, so already coherent in the VM) then
-    # doesn't re-tar its whole tree into the VM every launch. Older transcripts
-    # already on disk in the state dir stay resumable; they just aren't re-copied
-    # from the host or re-flushed. _proj_flush feeds CAGE_FLUSH_PATHS below.
-    local _proj_flush=()
-    if [[ -n "$MAX_SESSIONS" ]]; then
-      if [[ -d "$HOST_PROJECT_SESSIONS" ]]; then
-        local _sess
-        while IFS= read -r _sess; do
-          [[ -f "$_sess" ]] || continue
-          cp -pf "$_sess" "${STATE_DIR}/projects/${PROJECT_SLUG}/" 2>/dev/null || true
-          _proj_flush+=("projects/${PROJECT_SLUG}/${_sess##*/}")
-        done < <(ls -t "${HOST_PROJECT_SESSIONS}"/*.jsonl 2>/dev/null | head -n "$MAX_SESSIONS")
-      fi
-      log "sessions limited to ${MAX_SESSIONS} most recent"
+    # Seed host session history. With a limit, only the N newest transcripts and
+    # the state keyed to them are copied; older ones already in the VM stay
+    # resumable, they just aren't re-copied.
+    local _sess _id _sat
+    if [[ -z "$MAX_SESSIONS" ]]; then
+      log "seeding all host sessions for colima..."
+      cage_seed "$CLAUDE_HOME" "projects/${PROJECT_SLUG}" -u
+      for _sat in "${KEYED_SATELLITES[@]}" "${SHARED_SATELLITES[@]}"; do cage_seed "$CLAUDE_HOME" "$_sat" -u; done
+    elif (( MAX_SESSIONS > 0 )); then
+      log "seeding the ${MAX_SESSIONS} most recent host sessions for colima..."
+      while IFS= read -r _sess; do
+        _id=$(basename "$_sess" .jsonl)
+        cage_seed "$CLAUDE_HOME" "projects/${PROJECT_SLUG}/${_id}.jsonl" -u
+        cage_seed "$CLAUDE_HOME" "projects/${PROJECT_SLUG}/${_id}" -u
+        for _sat in "${KEYED_SATELLITES[@]}"; do cage_seed "$CLAUDE_HOME" "${_sat}/${_id}" -u; done
+      done < <(ls -t "${HOST_PROJECT_SESSIONS}"/*.jsonl 2>/dev/null | grep -v '/agent-[^/]*$' | head -n "$MAX_SESSIONS")
+      for _sat in "${SHARED_SATELLITES[@]}"; do cage_seed "$CLAUDE_HOME" "$_sat" -u; done
+    elif [[ -n "$NO_SYNC" ]]; then
+      log "session sync off (--no-sync): no history in, none out"
     else
-      _proj_flush=("projects/${PROJECT_SLUG}")
-      if [[ -d "$HOST_PROJECT_SESSIONS" ]]; then
-        rsync -au "${HOST_PROJECT_SESSIONS}/" "${STATE_DIR}/projects/${PROJECT_SLUG}/" 2>/dev/null || \
-          cp -ru "${HOST_PROJECT_SESSIONS}/." "${STATE_DIR}/projects/${PROJECT_SLUG}/" 2>/dev/null || true
-      fi
+      log "no session history seeded${BOX_WORKER:+ (worker default)}"
     fi
-    local _seed_sat
-    for _seed_sat in tasks session-env shell-snapshots paste-cache plans file-history; do
-      if [[ -d "${CLAUDE_HOME}/${_seed_sat}" ]]; then
-        mkdir -p "${STATE_DIR}/${_seed_sat}"
-        rsync -au "${CLAUDE_HOME}/${_seed_sat}/" "${STATE_DIR}/${_seed_sat}/" 2>/dev/null || \
-          cp -ru "${CLAUDE_HOME}/${_seed_sat}/." "${STATE_DIR}/${_seed_sat}/" 2>/dev/null || true
-      fi
-    done
-
-    # Scope the cage's flush to just what we seeded from the host above, plus the
-    # config/relay written earlier this run. The projects/ tree accumulates every
-    # project's sessions across runs (multi-GB), and re-tarring all of it into the
-    # VM each launch is the startup cost. Only this project's slice is host-seeded;
-    # the rest is box-written and already coherent in the VM. Keep this list in
-    # step with the seeds above and the config writes earlier in box_stage.
-    CAGE_FLUSH_PATHS=(
-      CLAUDE.md settings.json .claude.json .credentials.json .mcp.json
-      plugins skills hooks
-      ${_proj_flush[@]+"${_proj_flush[@]}"}
-      tasks session-env shell-snapshots paste-cache plans file-history
-      .cage-relay
-    )
   fi
 
   # Mount .claude.json (main state) at the home dir level.
@@ -427,13 +385,11 @@ box_sync_back() {
   if [[ -n "$_CID" ]]; then
     # Colima: copy out through Docker's I/O path (the host can't see it directly).
     log "syncing state back from colima..."
-    docker cp "${_CID}:/_state/projects/${PROJECT_SLUG}/." "${_state_proj}/" 2>/dev/null || true
+    # Only what this run wrote; earlier history is already on the host.
+    [[ -n "$NO_SYNC" ]] || cage_cp_out_since "projects/${PROJECT_SLUG}" \
+      "${KEYED_SATELLITES[@]}" "${SHARED_SATELLITES[@]}"
     docker cp "${_CID}:/_state/.claude.json" "${STATE_DIR}/.claude.json" 2>/dev/null || true
     docker cp "${_CID}:/_state/.credentials.json" "${STATE_DIR}/.credentials.json" 2>/dev/null || true
-    local _sat
-    for _sat in tasks session-env shell-snapshots paste-cache plans file-history; do
-      docker cp "${_CID}:/_state/${_sat}/." "${STATE_DIR}/${_sat}/" 2>/dev/null || true
-    done
   fi
 
   # Write an in-box token refresh back to the macOS Keychain, newer-wins by
@@ -456,10 +412,18 @@ box_sync_back() {
     fi
   fi
 
+  if [[ -n "$NO_SYNC" ]]; then
+    printf '[claude-box] session kept in the box (--no-sync); to resume: claude-box -c\n' >&2
+    return 0
+  fi
+
   # Copy sessions to the host's Claude project dir for cross-tool resumability,
-  # preserving mtimes so the resume hint picks the just-closed session correctly.
-  cp -pf "${_state_proj}/"*.jsonl "$HOST_PROJECT_SESSIONS/" 2>/dev/null
-  cp -prf "${_state_proj}/"*/ "$HOST_PROJECT_SESSIONS/" 2>/dev/null
+  # newer-wins and preserving mtimes so the resume hint picks the just-closed
+  # session correctly.
+  rsync -au --exclude='.*' "${_state_proj}/" "$HOST_PROJECT_SESSIONS/" 2>/dev/null || {
+    cp -pf "${_state_proj}/"*.jsonl "$HOST_PROJECT_SESSIONS/" 2>/dev/null
+    cp -prf "${_state_proj}/"*/ "$HOST_PROJECT_SESSIONS/" 2>/dev/null
+  }
 
   # Resume hint: newest transcript by mtime across the state dir and host dir,
   # skipping agent-*.jsonl subagent sidechains.

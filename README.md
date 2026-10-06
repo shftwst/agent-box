@@ -32,6 +32,7 @@ The boundary is deliberately tight by default. The safety posture in one view:
 | Host filesystem | Only the project dir (at its exact host path) and any explicit extra mounts are visible. Nothing else. |
 | Host docker socket | Never mounted. The box refuses to start if one is present, since a host socket is root-equivalent control of the host. |
 | `~/.claude` skills, plugins, hooks, `.mcp.json` | Mounted read-only, so the container reflects your local setup but cannot alter it. |
+| `~/.agents` | Mounted read-only in every box when it exists, with the folders its linked skills point to. `~/.agents/AGENTS.md` shows the global file merged with the project's `AGENTS.md` chain; the host file is never written. Workers see an empty `skills` folder. |
 | `~/.ssh` | Mounted read-only; the SSH agent is forwarded. Drop both with `--no-ssh`. |
 | Published services | Bind host loopback (`127.0.0.1`) only, never the LAN. |
 | Nested containers | Run on an engine inside the box whose authority is bounded by the cage. No host root. |
@@ -126,7 +127,8 @@ These box flags are consumed by the wrapper before `claude` sees them, and are p
 - `--engine <mode>`: nested container engine posture: `auto` (default), `sysbox`, `rootless`, `privileged-dind`, `none`. See [Nested container engine](#nested-container-engine).
 - `--name <name>`: name the box's container (default `claude-box-<project>-<pid>`), so a caller can address it with `docker stop` / `docker exec`. Must match docker's charset `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
 - `--name-file <path>`: write the resolved container name to `<path>` just before launch (removed on exit), so a headless supervisor can discover the box and stop it.
-- `--sessions <n>`: on colima, seed and flush only the `n` most-recent session transcripts of the current project instead of its whole history. Speeds up startup for a project whose session/workflow history has grown to gigabytes. Older transcripts stay on disk in the state dir and remain resumable; they are just not re-copied from the host or re-flushed each launch. Also settable as `CLAUDE_BOX_MAX_SESSIONS`.
+- `--sessions <n>`: on colima, copy only the `n` most-recent session transcripts of the current project into the box instead of its whole history. `0` copies none. See [Session history on colima](#session-history-on-colima).
+- `--no-sync`: on colima, copy no session history into the box and none back to the host on exit. See [Session history on colima](#session-history-on-colima).
 - `--image <tag>`: run a project-built image instead of the default box image, so a project can bake its own dependencies (a JDK, a toolchain) into a layer. Also settable as `CLAUDE_BOX_IMAGE` (typically in `.env.claude-box`). The image must be built `FROM claude-box` so the cage entrypoint and env contract still hold. See [Baking project dependencies](#baking-project-dependencies).
 
 #### Baking project dependencies
@@ -183,7 +185,7 @@ codex-box "fix the flaky test"    # start with a prompt
 codex-box resume --last           # resume the latest session
 ```
 
-Codex state persists in `~/.codex-box/state/`. A host `codex login` is seeded into the box, and refreshed account authentication is synced back on exit.
+Codex state persists in `~/.codex-box/state/`. A host `codex login` is seeded into the box, and refreshed account authentication is synced back on exit. Host sessions are seeded too; `--sessions` and `--no-sync` work as in `claude-box` (see [Session history on colima](#session-history-on-colima)).
 
 ### DeepSeek Harness
 
@@ -376,6 +378,26 @@ Conversation history, project memories, settings, and harness-managed credential
 ```bash
 rm -rf ~/.claude-box/state/
 ```
+
+### Session history on colima
+
+On colima, each launch copies host files into the box's state directory and flushes them into the VM, and exit copies new sessions back. Only files that changed since the last launch go in, and only files written during the run come back. When the VM shares the state directory with the host (colima's default home mount), exit skips the copy because the files are already there.
+
+Every box takes the same controls:
+
+| Control | Effect |
+|---|---|
+| `--sessions <n>` or `<PREFIX>_MAX_SESSIONS=<n>` | Copy in only the `n` newest sessions of the current project. `0` copies none. Older sessions already in the box stay resumable. |
+| `--no-sync` or `<PREFIX>_NO_SYNC=1` | Copy no session history in and none back. The session stays in the box (`claude-box -c` resumes it). |
+| Neither | Copy in all history. |
+
+`<PREFIX>` is the box's env prefix (`CLAUDE_BOX`, `CODEX_BOX`, `PI_BOX`, `DEEPSEEK_BOX`), and the variables also work in `.env.agent-box` and `.env.<box>`. A flag wins over a variable, and `--no-sync` wins over `--sessions`. Workers started by the broker default to `--sessions 0` but still copy their own sessions back.
+
+What counts as history differs by box:
+
+- `claude-box`: this project's transcripts in `~/.claude/projects/`, plus the file history, tasks and session env keyed to them. They are copied back to the host on exit.
+- `codex-box`: rollouts in `~/.codex/sessions/`. All history copies every host rollout, because Codex stores them by date rather than by project; `--sessions <n>` picks the newest `n` whose recorded working directory is the current project. Sessions written in the box stay in the box.
+- `pi-box` and `deepseek-box`: their history lives only in the box's state directory, so nothing is copied and the controls have no effect.
 
 ## Updating
 
