@@ -310,6 +310,15 @@ OPENROUTER_API_KEY=sk-or-codex-specific-...
 
 `AGENT_BOX_EXTRA_VARS` (and `AGENT_BOX_EXTRA_MOUNTS`) work like the per-box `*_EXTRA_VARS` / `*_EXTRA_MOUNTS`, but apply to all boxes. They're additive with the per-box arrays, so a box gets both. In a per-box file, use that box's prefixed array name (`CODEX_BOX_EXTRA_VARS`), not `AGENT_BOX_EXTRA_VARS` again, or you'll replace the shared list instead of extending it.
 
+`AGENT_BOX_EXTRA_RUN_ARGS` passes extra arguments straight to `docker run` for every box, for one-off settings specific to your machine or network. For example, to resolve a Tailscale MagicDNS name that the container's DNS doesn't know:
+
+```bash
+# .env.agent-box
+AGENT_BOX_EXTRA_RUN_ARGS=(--add-host agentgateway.example.internal:100.80.160.4)
+```
+
+These arguments can widen the cage (for example `--privileged` or `--network host`), so use them only for settings you'd accept on any box in that project.
+
 ### Running multiple boxes at once (Claude auth)
 
 By default the box authenticates from your macOS Keychain subscription login, whose OAuth refresh token is single-use and rotating. That's fine for one box, but two concurrent boxes each refresh it independently: the auth server sees the same token spent twice, treats it as a leak, and revokes the whole lineage, silently logging every box (and often host Claude) out. Re-running `/login` in any one box heals them all, because the credential file is a shared mount, but the logout keeps recurring.

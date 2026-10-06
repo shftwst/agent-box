@@ -946,6 +946,7 @@ cage_run() {
   docker run --rm ${TTY_FLAGS[@]+"${TTY_FLAGS[@]}"} \
     --name "$CONTAINER_NAME" \
     ${BOX_RUN_ARGS[@]+"${BOX_RUN_ARGS[@]}"} \
+    ${AGENT_BOX_EXTRA_RUN_ARGS[@]+"${AGENT_BOX_EXTRA_RUN_ARGS[@]}"} \
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
     -e "HOME=${HOME}" \
