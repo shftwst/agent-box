@@ -100,6 +100,15 @@ if [ "$(id -u)" = "0" ] && [ "${HOST_UID}" != "0" ]; then
     fi
   fi
 
+  # Extra CA certs (AGENT_BOX_CA_CERTS, bundled by libcage): one file per cert
+  # into the system trust store, before anything (the nested engine included)
+  # opens a TLS connection.
+  if [ -s "${CAGE_CA_BUNDLE:-}" ]; then
+    awk '/-----BEGIN CERTIFICATE-----/ { n++ } n { print > ("/usr/local/share/ca-certificates/agent-box-" n ".crt") }' \
+      "$CAGE_CA_BUNDLE"
+    update-ca-certificates >/dev/null 2>&1 || echo "[cage] WARNING: could not update CA certificates" >&2
+  fi
+
   # Payload-specific prep, if the payload image shipped a hook. Runs as root,
   # before the engine starts, with the same env this script sees. cage-base
   # ships none; claude-box drops a theme install + stale-dir cleanup here.

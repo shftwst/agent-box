@@ -541,6 +541,34 @@ cage_stage_gitconfig() {
   [[ -f "${HOME}/.gitconfig" ]] && cp -f "${HOME}/.gitconfig" "${RELAY_DIR}/gitconfig" 2>/dev/null || true
 }
 
+# Extra CA certificates from AGENT_BOX_CA_CERTS (host PEM files): bundle them in
+# the relay for the entrypoint to add to the system trust store, and point the
+# tools that ignore that store at it. Node only reads extra roots from
+# NODE_EXTRA_CA_CERTS; SSL_CERT_FILE and REQUESTS_CA_BUNDLE get the full system
+# bundle, which the entrypoint has updated by the time the payload starts.
+cage_stage_ca_certs() {
+  [[ -n "$RELAY_DIR" ]] || return 0
+  local bundle="${RELAY_DIR}/ca-certs.pem" f n=0
+  rm -f "$bundle"
+  for f in "${AGENT_BOX_CA_CERTS[@]+"${AGENT_BOX_CA_CERTS[@]}"}"; do
+    if grep -q -- '-----BEGIN CERTIFICATE-----' "$f" 2>/dev/null; then
+      { cat "$f"; echo; } >> "$bundle"
+      n=$((n + 1))
+    else
+      warn "AGENT_BOX_CA_CERTS: ${f} is not a readable PEM certificate; skipped"
+    fi
+  done
+  [[ $n -gt 0 ]] || return 0
+  local in_box="${BOX_STATE_MOUNT}/.cage-relay/ca-certs.pem" system=/etc/ssl/certs/ca-certificates.crt
+  env_args+=(
+    -e "CAGE_CA_BUNDLE=${in_box}"
+    -e "NODE_EXTRA_CA_CERTS=${in_box}"
+    -e "SSL_CERT_FILE=${system}"
+    -e "REQUESTS_CA_BUNDLE=${system}"
+  )
+  log "trusting extra CA certs from ${n} file(s)"
+}
+
 # cage_mount_once <dir> [mode]: bind-mount <dir> at its host path unless the
 # project mount already shows it or it is already mounted (Docker rejects
 # duplicate mount points).
@@ -897,6 +925,7 @@ cage_run() {
   cage_setup_ssh
   cage_setup_workers
   cage_stage_gitconfig
+  cage_stage_ca_certs
 
   # Share XDG cache and ~/.local/bin across boxes (generic).
   mkdir -p "${HOME}/.cache"; override_mounts+=(-v "${HOME}/.cache:${HOME}/.cache")
