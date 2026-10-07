@@ -221,6 +221,21 @@ The documented provider API keys and cloud-provider variables are forwarded when
 
 Note: `pi-box` is not yet verified to the standard of the other three. Treat it as experimental and check its behaviour before relying on it.
 
+## Workers in Herdr
+
+Launched from a [Herdr](https://herdr.dev/) pane with `--workers`, a box can open other caged agents as workers in panes beside it:
+
+```bash
+claude-box --workers                   # claude workers
+claude-box --workers=claude,codex,pi   # allow more kinds; the first is the default
+```
+
+The box gets `box-worker` (`spawn`, `ask`, `read`, `poll`, `close`, `list`) and a short brief in its instructions. A broker on the host opens each worker pane and runs that kind's box wrapper, so every worker is caged too, and the orchestrator never touches Herdr directly. See [docs/herdr-worker-broker.md](docs/herdr-worker-broker.md) for the design.
+
+Each worker picks its model at spawn: a `claude` worker takes `--model`, `--base-url`, `--auth-token` and `--effort`; a `codex` worker takes `--profile <name>` (a `~/.codex/<name>.config.toml`); a `pi` worker uses pi's `models.json`. Workers start with `--sessions 0` and no skills. If `~/.config/agent-box/worker-models.md` exists, its contents are added to the brief, as a catalogue of models the orchestrator can point workers at.
+
+The `herdr-box-workers` skill in `skills/` teaches an agent to do this. Inside a box it uses `box-worker`; on the host, in a Herdr pane, its `scripts/host-workers start` runs the same broker for that pane, so a host agent can open caged workers too. Install it by linking `skills/herdr-box-workers` into `~/.agents/skills` (Codex and the boxes) and `~/.claude/skills` (Claude Code).
+
 ## Ollama
 
 Run Claude Code against a local (or remote) Ollama server that exposes the Anthropic-compatible API, mirroring `ollama launch claude --model <model>`:
@@ -314,7 +329,7 @@ OPENROUTER_API_KEY=sk-or-codex-specific-...
 
 ```bash
 # .env.agent-box
-AGENT_BOX_EXTRA_RUN_ARGS=(--add-host agentgateway.example.internal:100.80.160.4)
+AGENT_BOX_EXTRA_RUN_ARGS=(--add-host agentgateway.example.internal:100.64.0.10)
 ```
 
 These arguments can widen the cage (for example `--privileged` or `--network host`), so use them only for settings you'd accept on any box in that project.

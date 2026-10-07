@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# host-workers: drive caged agent-box workers from a host agent in a Herdr pane.
+#
+#   host-workers start [kinds]   start a worker broker for this pane
+#                                (kinds: comma list, default claude,codex,pi)
+#   host-workers stop            stop it; the broker closes every worker pane
+#   host-workers <verb> ...      any box-worker verb (spawn/ask/read/poll/close/list)
+#
+# Inside a box launched with --workers, use box-worker directly instead.
+set -euo pipefail
+
+AB="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../.." && pwd)"
+
+if [[ "${HERDR_ENV:-}" != 1 || -z "${HERDR_PANE_ID:-}" ]]; then
+  echo "host-workers: not inside a Herdr pane" >&2
+  exit 1
+fi
+
+dir="${HOME}/.claude-box/brokers"
+key="${HERDR_PANE_ID//[^a-zA-Z0-9]/_}"
+sock="${dir}/${key}.sock" logfile="${dir}/${key}.log" pidfile="${dir}/${key}.pid"
+export CAGE_WORKER_SOCKET="$sock"
+
+running() { [[ -S "$sock" ]] && "${AB}/box-worker" list >/dev/null 2>&1; }
+
+case "${1:-}" in
+  start)
+    if running; then
+      echo "host-workers: broker already running for pane ${HERDR_PANE_ID}"
+      exit 0
+    fi
+    allow=()
+    for kind in $(printf '%s' "${2:-claude,codex,pi}" | tr ',' ' '); do
+      allow+=(--allow "${kind}=${AB}/${kind}-box")
+    done
+    mkdir -p "$dir"
+    nohup "${AB}/herdr-worker-broker" --pane "$HERDR_PANE_ID" --project "$PWD" \
+      "${allow[@]}" --socket "$sock" --log "$logfile" >>"$logfile" 2>&1 &
+    echo $! > "$pidfile"
+    for _ in $(seq 1 50); do running && break; sleep 0.1; done
+    if ! running; then
+      echo "host-workers: broker did not start; see ${logfile}" >&2
+      exit 1
+    fi
+    echo "host-workers: broker running for pane ${HERDR_PANE_ID} (kinds ${2:-claude,codex,pi})"
+    ;;
+  stop)
+    if [[ -f "$pidfile" ]] && kill "$(cat "$pidfile")" 2>/dev/null; then
+      rm -f "$pidfile"
+      echo "host-workers: broker stopped; its worker panes are closed"
+    else
+      echo "host-workers: no broker running for pane ${HERDR_PANE_ID}"
+    fi
+    ;;
+  ""|-h|--help)
+    sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    running || { echo "host-workers: no broker for this pane; run: host-workers start" >&2; exit 1; }
+    exec "${AB}/box-worker" "$@"
+    ;;
+esac

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -407,6 +408,11 @@ def main():
     opts.ready_regex = ready
 
     broker = Broker(opts)
+
+    # libcage stops the broker with a plain kill, and a backgrounded process
+    # ignores SIGINT, so turn SIGTERM and SIGHUP into the same clean exit.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *_: sys.exit(0))
 
     try:
         serve(broker, opts.socket, opts.log)
