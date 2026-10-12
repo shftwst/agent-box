@@ -409,7 +409,9 @@ cage_setup_ssh() {
 # project dir and agent kind are settled here, before the box exists.
 # See docs/herdr-worker-broker.md.
 cage_setup_workers() {
-  [[ $WORKERS -eq 1 ]] || return 0
+  # A worker never opens workers of its own, even when the project's .env sets
+  # AGENT_BOX_WORKERS=1.
+  [[ $WORKERS -eq 1 || ( "${AGENT_BOX_WORKERS:-}" == 1 && -z "${BOX_WORKER:-}" ) ]] || return 0
 
   if [[ "${HERDR_ENV:-}" != "1" || -z "${HERDR_PANE_ID:-}" ]]; then
     warn "--workers: this shell is not inside a Herdr pane; no workers"
@@ -427,7 +429,7 @@ cage_setup_workers() {
 
   # The kinds a worker may be, fixed here and never taken from the box. Each
   # must have a wrapper in this repo, so every worker is itself a cage.
-  local kinds="${WORKER_KINDS:-$BOX_HERDR_AGENT}"
+  local kinds="${WORKER_KINDS:-${AGENT_BOX_WORKER_KINDS:-$BOX_HERDR_AGENT}}"
   local allow=() kind launcher
   for kind in $(printf '%s' "$kinds" | tr ',' ' '); do
     launcher="${BOX_SRC_DIR}/${kind}-box"
@@ -454,20 +456,12 @@ cage_setup_workers() {
     return 0
   fi
 
-  local limit=()
-  if [[ -n "${AGENT_BOX_MAX_WORKERS:-}" ]]; then
-    if [[ "$AGENT_BOX_MAX_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
-      limit=(--max-workers "$AGENT_BOX_MAX_WORKERS")
-    else
-      warn "--workers: AGENT_BOX_MAX_WORKERS must be a positive whole number; using the broker default"
-    fi
-  fi
-
+  # The broker reads its tunables (AGENT_BOX_WORKER_LIMIT and the rest) from the
+  # environment, which the .env files sourced above are exported into.
   "$broker" \
     --pane "$HERDR_PANE_ID" \
     --project "$PROJECT_DIR" \
     "${allow[@]}" \
-    ${limit[@]+"${limit[@]}"} \
     --socket "$sock" \
     --log "$logfile" &
   _CAGE_RELAY_PIDS+=($!)

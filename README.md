@@ -234,9 +234,35 @@ claude-box --workers=claude,codex,pi   # allow more kinds; the first is the defa
 
 The box gets `box-worker` (`spawn`, `ask`, `read`, `poll`, `close`, `list`) and a short brief in its instructions. A broker on the host opens each worker pane and runs that kind's box wrapper, so every worker is caged too, and the orchestrator never touches Herdr directly. See [docs/herdr-worker-broker.md](docs/herdr-worker-broker.md) for the design.
 
-Each worker picks its model at spawn: a `claude` worker takes `--model`, `--base-url`, `--auth-token` and `--effort`; a `codex` worker takes `--profile <name>` (a `~/.codex/<name>.config.toml`); a `pi` worker uses pi's `models.json`. Workers start with `--sessions 0` and no skills. A box can run 4 workers at once; set `AGENT_BOX_MAX_WORKERS` in your shell or the project's `.env.agent-box` to change that (`host-workers` reads it from your shell only). If `~/.config/agent-box/worker-models.md` exists, its contents are added to the brief, as a catalogue of models the orchestrator can point workers at.
+Each worker picks its model at spawn: a `claude` worker takes `--model`, `--base-url`, `--auth-token` and `--effort`; a `codex` worker takes `--profile <name>` (a `~/.codex/<name>.config.toml`); a `pi` worker uses pi's `models.json`. Workers start with `--sessions 0` and no skills. If `~/.config/agent-box/worker-models.md` exists, its contents are added to the brief, as a catalogue of models the orchestrator can point workers at.
 
 The `herdr-box-workers` skill in `skills/` teaches an agent to do this. Inside a box it uses `box-worker`; on the host, in a Herdr pane, its `scripts/host-workers start` runs the same broker for that pane, so a host agent can open caged workers too. Install it by linking `skills/herdr-box-workers` into `~/.agents/skills` (Codex and the boxes) and `~/.claude/skills` (Claude Code).
+
+### Worker settings
+
+Set these in your shell or the project's `.env.agent-box`. `host-workers` reads them from your shell only. A flag on the command line wins over the variable.
+
+| Variable | Default | What it sets |
+|---|---|---|
+| `AGENT_BOX_WORKERS` | unset | `1` turns workers on as if you passed `--workers`. Ignored inside a worker, so workers never open workers of their own |
+| `AGENT_BOX_WORKER_KINDS` | the box's own kind (`host-workers`: `claude,codex,pi`) | Kinds allowed when `--workers` gives no list; the first is the default |
+| `AGENT_BOX_WORKER_LIMIT` | 4 | Workers open at once |
+| `AGENT_BOX_WORKER_MAX_PROMPT` | 8192 | Largest `ask` prompt, in bytes |
+| `AGENT_BOX_WORKER_MAX_LINES` | 2000 | Most screen lines `read` returns |
+| `AGENT_BOX_WORKER_TIMEOUT_CAP` | 1800000 (30 min) | Longest `ask`, in ms |
+| `AGENT_BOX_WORKER_READY_TIMEOUT` | 300000 (5 min) | How long `spawn` waits for a worker's prompt, in ms |
+| `AGENT_BOX_WORKER_IDLE_GRACE` | 15000 | How long `ask` waits for a worker to start working before treating it as already done, in ms |
+| `AGENT_BOX_WORKER_READY_REGEX` | built in for `claude` and `codex` | Pattern that means a kind's worker is at its prompt, as `KIND=REGEX`, one per line |
+
+The numeric settings take a positive whole number; any other value is reported and the default used.
+
+```bash
+# .env.agent-box
+AGENT_BOX_WORKERS=1
+AGENT_BOX_WORKER_KINDS=claude,codex
+AGENT_BOX_WORKER_LIMIT=8
+AGENT_BOX_WORKER_READY_TIMEOUT=600000   # slow cold starts
+```
 
 ## Ollama
 

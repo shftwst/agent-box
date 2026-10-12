@@ -373,8 +373,25 @@ def session(broker, conn, log_path):
             stream.flush()
 
 
+def env_int(name, default):
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    if value.isdigit() and int(value) > 0:
+        return int(value)
+    print(f"herdr-worker-broker: ignoring {name}={value!r}; want a positive whole number",
+          file=sys.stderr)
+    return default
+
+
+def env_lines(name):
+    return [line.strip() for line in os.environ.get(name, "").splitlines() if line.strip()]
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Each tunable defaults to its AGENT_BOX_WORKER_* environment variable; a flag wins.")
     parser.add_argument("--pane", required=True, help="orchestrator pane id, the registry key")
     parser.add_argument("--project", required=True, help="cwd every worker is given")
     parser.add_argument("--allow", required=True, action="append", metavar="KIND=LAUNCHER",
@@ -382,21 +399,33 @@ def main():
                              "The first is the default. A kind not named here cannot be spawned.")
     parser.add_argument("--socket", required=True)
     parser.add_argument("--log", required=True)
-    parser.add_argument("--max-workers", type=int, default=4)
-    parser.add_argument("--max-prompt", type=int, default=8192)
-    parser.add_argument("--max-lines", type=int, default=2000)
-    parser.add_argument("--timeout-cap", type=int, default=1800000,
+    parser.add_argument("--max-workers", type=int, default=env_int("AGENT_BOX_WORKER_LIMIT", 4),
+                        help="AGENT_BOX_WORKER_LIMIT")
+    parser.add_argument("--max-prompt", type=int,
+                        default=env_int("AGENT_BOX_WORKER_MAX_PROMPT", 8192),
+                        help="bytes; AGENT_BOX_WORKER_MAX_PROMPT")
+    parser.add_argument("--max-lines", type=int, default=env_int("AGENT_BOX_WORKER_MAX_LINES", 2000),
+                        help="most screen lines read returns; AGENT_BOX_WORKER_MAX_LINES")
+    parser.add_argument("--timeout-cap", type=int,
+                        default=env_int("AGENT_BOX_WORKER_TIMEOUT_CAP", 1800000),
                         help="max ask --wait, ms (default 30min; slow local models can take "
-                             "tens of minutes, and read/poll no longer block during a long ask)")
-    parser.add_argument("--ready-regex", action="append", default=[], metavar="KIND=REGEX",
+                             "tens of minutes, and read/poll no longer block during a long ask); "
+                             "AGENT_BOX_WORKER_TIMEOUT_CAP")
+    parser.add_argument("--ready-regex", action="append",
+                        default=env_lines("AGENT_BOX_WORKER_READY_REGEX"), metavar="KIND=REGEX",
                         help="override the readiness pattern for a kind, repeatable. "
-                             "Built-in defaults cover claude and codex.")
-    parser.add_argument("--ready-timeout", type=int, default=300000,
-                        help="how long to wait for a spawned worker to reach its prompt, "
-                             "generous because a cold cage can take minutes to start")
-    parser.add_argument("--idle-grace", type=int, default=15000,
+                             "Built-in defaults cover claude and codex. "
+                             "AGENT_BOX_WORKER_READY_REGEX, one KIND=REGEX per line")
+    parser.add_argument("--ready-timeout", type=int,
+                        default=env_int("AGENT_BOX_WORKER_READY_TIMEOUT", 300000),
+                        help="how long to wait for a spawned worker to reach its prompt, ms, "
+                             "generous because a cold cage can take minutes to start; "
+                             "AGENT_BOX_WORKER_READY_TIMEOUT")
+    parser.add_argument("--idle-grace", type=int,
+                        default=env_int("AGENT_BOX_WORKER_IDLE_GRACE", 15000),
                         help="how long ask waits for a worker to start working before "
-                             "treating a still-idle worker as an instant reply")
+                             "treating a still-idle worker as an instant reply, ms; "
+                             "AGENT_BOX_WORKER_IDLE_GRACE")
     parser.add_argument("--herdr-bin", default=os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr"))
     opts = parser.parse_args()
 
