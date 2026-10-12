@@ -318,9 +318,24 @@ class Broker:
                 pass
 
 
+SECRET_FIELDS = ("auth_token",)
+
+
 def log(path, message):
-    with open(path, "a") as handle:
+    with open(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a") as handle:
         handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+
+
+def loggable(line):
+    try:
+        request = json.loads(line)
+    except ValueError:
+        return f"<unparseable request, {len(line)} bytes>"
+    if isinstance(request, dict):
+        for field in SECRET_FIELDS:
+            if request.get(field):
+                request[field] = "<redacted>"
+    return json.dumps(request)[:300]
 
 
 SUN_PATH_MAX = 100
@@ -353,7 +368,7 @@ def session(broker, conn, log_path):
             if not line:
                 continue
             reply = broker.handle(line)
-            log(log_path, ("ACCEPT " if reply.get("ok") else "REFUSE ") + line[:300])
+            log(log_path, ("ACCEPT " if reply.get("ok") else "REFUSE ") + loggable(line))
             stream.write(json.dumps(reply) + "\n")
             stream.flush()
 

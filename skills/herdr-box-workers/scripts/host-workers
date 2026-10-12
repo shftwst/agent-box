@@ -34,6 +34,7 @@ case "${1:-}" in
       allow+=(--allow "${kind}=${AB}/${kind}-box")
     done
     mkdir -p "$dir"
+    (umask 077 && touch "$logfile")
     nohup "${AB}/herdr-worker-broker" --pane "$HERDR_PANE_ID" --project "$PWD" \
       "${allow[@]}" --socket "$sock" --log "$logfile" >>"$logfile" 2>&1 &
     echo $! > "$pidfile"

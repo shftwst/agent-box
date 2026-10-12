@@ -265,7 +265,9 @@ broker is spawn permitted workers and talk to them.
 
 It does not protect the host from the broker. The broker holds the full socket, so a
 flaw in it is a host-execution flaw. It has to stay small enough to read in one sitting,
-and it should log every request it accepts and every one it refuses.
+and it should log every request it accepts and every one it refuses. The log masks
+`auth_token` and records only the length of a request that is not valid JSON, and it is
+created readable by the user only, because requests carry prompts.
 
 It does not sandbox worker behaviour beyond the cage each worker already runs in. A
 prompt can tell a worker to do anything that worker could do anyway, which is bounded by
