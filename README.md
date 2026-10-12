@@ -119,6 +119,8 @@ claude-box -p "..."         # non-interactive prompt (pipe-friendly)
 
 Every argument is passed directly to `claude`. Use `--` to force everything after it to `claude`, so a `claude` flag that shares a name with a box flag can still be passed (e.g. `claude-box -- --engine foo`).
 
+`docker run` options given before `--`, such as `--tmpfs /scratch` or `-e FOO=bar`, are dropped with a warning instead of reaching `claude`. Set them in [`AGENT_BOX_EXTRA_RUN_ARGS`](#shared-values-across-boxes-via-envagent-box) instead. Docker short flags that `claude` also uses (`-c`, `-d`, `-h`, `-p`, `-v`, `-w`) still go to `claude`.
+
 These box flags are consumed by the wrapper before `claude` sees them, and are position-free (they can appear anywhere on the command line):
 
 - `--upgrade`: `git pull` the install dir and exit. See [Updating](#updating).

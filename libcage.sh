@@ -96,6 +96,36 @@ IMAGE_OVERRIDE=""
 MAX_SESSIONS=""
 NO_SYNC=""
 declare -a _passthrough=()
+
+# docker run options the cage drops so they never reach the harness; the place for
+# them is AGENT_BOX_EXTRA_RUN_ARGS. Docker short flags the harness also uses
+# (-c -d -h -p -v -w), --help and --name (a cage flag) are not listed.
+_DOCKER_BOOL_FLAGS=" --detach --init --interactive --no-healthcheck --oom-kill-disable
+  --privileged --publish-all --quiet --read-only --rm --sig-proxy --tty --use-api-socket
+  -i -t -it -ti -P -q "
+_DOCKER_VALUE_FLAGS=" --add-host --annotation --attach --blkio-weight --blkio-weight-device
+  --cap-add --cap-drop --cgroup-parent --cgroupns --cidfile --cpu-period --cpu-quota
+  --cpu-rt-period --cpu-rt-runtime --cpu-shares --cpus --cpuset-cpus --cpuset-mems
+  --detach-keys --device --device-cgroup-rule --device-read-bps --device-read-iops
+  --device-write-bps --device-write-iops --dns --dns-option --dns-search --domainname
+  --entrypoint --env --env-file --expose --gpus --group-add --health-cmd --health-interval
+  --health-retries --health-start-interval --health-start-period --health-timeout --hostname
+  --ip --ip6 --ipc --isolation --label --label-file --link --link-local-ip --log-driver
+  --log-opt --mac-address --memory --memory-reservation --memory-swap --memory-swappiness
+  --mount --network --network-alias --oom-score-adj --pid --pids-limit --platform --publish
+  --pull --restart --runtime --security-opt --shm-size --stop-signal --stop-timeout
+  --storage-opt --sysctl --tmpfs --ulimit --user --userns --uts --volume --volume-driver
+  --volumes-from --workdir -a -e -l -m -u "
+
+# _docker_flag_arity <arg>: 0 for a docker boolean flag, 1 for one that takes a
+# separate value, 2 for --flag=value; fails for anything else.
+_docker_flag_arity() {
+  local flag=" ${1%%=*} " nl=$'\n'
+  [[ "${_DOCKER_BOOL_FLAGS//$nl/ }" == *"$flag"* ]] && { echo 0; return; }
+  [[ "${_DOCKER_VALUE_FLAGS//$nl/ }" == *"$flag"* ]] || return 1
+  [[ "$1" == *=* ]] && echo 2 || echo 1
+}
+
 cage_parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -129,8 +159,16 @@ cage_parse_args() {
       --no-sync) NO_SYNC=1 ;;
       *)
         _CONSUMED=0
+        local _arity
         if declare -F box_parse_arg >/dev/null && box_parse_arg "$@"; then
           shift "$(( _CONSUMED > 0 ? _CONSUMED - 1 : 0 ))"
+        elif _arity=$(_docker_flag_arity "$1"); then
+          if [[ "$_arity" == 1 && $# -gt 1 ]]; then
+            warn "ignoring docker option $1 $2 (set AGENT_BOX_EXTRA_RUN_ARGS to pass docker run options)"
+            shift
+          else
+            warn "ignoring docker option $1 (set AGENT_BOX_EXTRA_RUN_ARGS to pass docker run options)"
+          fi
         else
           _passthrough+=("$1")
         fi ;;
