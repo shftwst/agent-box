@@ -76,6 +76,6 @@ If `~/.config/agent-box/worker-models.md` exists, it lists the user's local endp
 
 ## Limits
 
-- The broker caps workers (4 by default), prompt size (8 KB) and `ask` time (30 minutes), and refuses past a cap.
+- The broker caps workers (4 by default; the user sets `AGENT_BOX_MAX_WORKERS` before launch to change it), prompt size (8 KB) and `ask` time (30 minutes), and refuses past a cap.
 - One broker per orchestrator pane. A second `host-workers start` in the same pane reuses the running one.
 - Herdr cannot see a caged worker's state directly, so `poll` can report `idle` while the worker is busy. Trust `ask`'s return, files and `read` over a single `poll`.

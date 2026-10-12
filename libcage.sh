@@ -454,10 +454,20 @@ cage_setup_workers() {
     return 0
   fi
 
+  local limit=()
+  if [[ -n "${AGENT_BOX_MAX_WORKERS:-}" ]]; then
+    if [[ "$AGENT_BOX_MAX_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+      limit=(--max-workers "$AGENT_BOX_MAX_WORKERS")
+    else
+      warn "--workers: AGENT_BOX_MAX_WORKERS must be a positive whole number; using the broker default"
+    fi
+  fi
+
   "$broker" \
     --pane "$HERDR_PANE_ID" \
     --project "$PROJECT_DIR" \
     "${allow[@]}" \
+    ${limit[@]+"${limit[@]}"} \
     --socket "$sock" \
     --log "$logfile" &
   _CAGE_RELAY_PIDS+=($!)

@@ -33,10 +33,18 @@ case "${1:-}" in
     for kind in $(printf '%s' "${2:-claude,codex,pi}" | tr ',' ' '); do
       allow+=(--allow "${kind}=${AB}/${kind}-box")
     done
+    limit=()
+    if [[ -n "${AGENT_BOX_MAX_WORKERS:-}" ]]; then
+      if [[ "$AGENT_BOX_MAX_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+        limit=(--max-workers "$AGENT_BOX_MAX_WORKERS")
+      else
+        echo "host-workers: AGENT_BOX_MAX_WORKERS must be a positive whole number; using the broker default" >&2
+      fi
+    fi
     mkdir -p "$dir"
     (umask 077 && touch "$logfile")
     nohup "${AB}/herdr-worker-broker" --pane "$HERDR_PANE_ID" --project "$PWD" \
-      "${allow[@]}" --socket "$sock" --log "$logfile" >>"$logfile" 2>&1 &
+      "${allow[@]}" ${limit[@]+"${limit[@]}"} --socket "$sock" --log "$logfile" >>"$logfile" 2>&1 &
     echo $! > "$pidfile"
     for _ in $(seq 1 50); do running && break; sleep 0.1; done
     if ! running; then
