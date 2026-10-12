@@ -98,11 +98,11 @@ NO_SYNC=""
 declare -a _passthrough=()
 
 # docker run options the cage drops so they never reach the harness; the place for
-# them is AGENT_BOX_EXTRA_RUN_ARGS. Docker short flags the harness also uses
-# (-c -d -h -p -v -w), --help and --name (a cage flag) are not listed.
+# them is AGENT_BOX_EXTRA_RUN_ARGS. Long options only: docker's short flags clash
+# with the harnesses' own (codex -m -i -a, pi -t -e -a, claude -c -p -v ...).
+# --help and --name (a cage flag) are not listed.
 _DOCKER_BOOL_FLAGS=" --detach --init --interactive --no-healthcheck --oom-kill-disable
-  --privileged --publish-all --quiet --read-only --rm --sig-proxy --tty --use-api-socket
-  -i -t -it -ti -P -q "
+  --privileged --publish-all --quiet --read-only --rm --sig-proxy --tty --use-api-socket "
 _DOCKER_VALUE_FLAGS=" --add-host --annotation --attach --blkio-weight --blkio-weight-device
   --cap-add --cap-drop --cgroup-parent --cgroupns --cidfile --cpu-period --cpu-quota
   --cpu-rt-period --cpu-rt-runtime --cpu-shares --cpus --cpuset-cpus --cpuset-mems
@@ -115,7 +115,7 @@ _DOCKER_VALUE_FLAGS=" --add-host --annotation --attach --blkio-weight --blkio-we
   --mount --network --network-alias --oom-score-adj --pid --pids-limit --platform --publish
   --pull --restart --runtime --security-opt --shm-size --stop-signal --stop-timeout
   --storage-opt --sysctl --tmpfs --ulimit --user --userns --uts --volume --volume-driver
-  --volumes-from --workdir -a -e -l -m -u "
+  --volumes-from --workdir "
 
 # _docker_flag_arity <arg>: 0 for a docker boolean flag, 1 for one that takes a
 # separate value, 2 for --flag=value; fails for anything else.
