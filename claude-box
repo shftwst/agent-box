@@ -371,8 +371,14 @@ JSEOF
     fi
   fi
 
-  # Mount .claude.json (main state) at the home dir level.
-  override_mounts+=(-v "${STATE_CLAUDE_JSON}:${HOME}/.claude.json")
+  # Mount .claude.json (main state) at the home dir level. Every box rewrites it in
+  # place, so a box starting mid-write can read a truncated file, reset it and show
+  # the trust dialog. Workers get a private copy instead (payload-init makes it).
+  if [[ -n "${BOX_WORKER:-}" ]]; then
+    override_mounts+=(-v "${STATE_CLAUDE_JSON}:/usr/local/share/cage/claude.json.seed:ro")
+  else
+    override_mounts+=(-v "${STATE_CLAUDE_JSON}:${HOME}/.claude.json")
+  fi
 }
 
 # --- box_sync_back: flush sessions, credentials, and satellite state back to the
