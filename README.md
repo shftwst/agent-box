@@ -371,6 +371,15 @@ AGENT_BOX_CA_CERTS=(~/.agents/certs/lab-root.crt)
 
 At startup the box adds them to the container's system trust store, which covers curl, git, openssl and the nested container engine. It also sets `NODE_EXTRA_CA_CERTS` for Node tools (Claude Code included), and points `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` at the updated system bundle for tools that read those. Use the CA's root certificate; a file that isn't PEM is skipped with a warning.
 
+`AGENT_BOX_TRUST_PROJECT=1` makes `claude-box` record the folder it is launched from as trusted, so Claude's folder-trust dialog doesn't stop the box or its workers:
+
+```bash
+# .env.agent-box
+AGENT_BOX_TRUST_PROJECT=1
+```
+
+Only the exact value `1` turns it on; any other value is ignored with a warning. If the box can't read its Claude config, it trusts nothing and the dialog shows as usual. The dialog exists because a project's `.claude/settings.json` and `.mcp.json` can run code (hooks, MCP servers) as soon as Claude starts. With this set, that code runs without asking, inside the cage but with the credentials the box forwards, so set it only in projects whose files you trust.
+
 ### Running multiple boxes at once (Claude auth)
 
 By default the box authenticates from your macOS Keychain subscription login, whose OAuth refresh token is single-use and rotating. That's fine for one box, but two concurrent boxes each refresh it independently: the auth server sees the same token spent twice, treats it as a leak, and revokes the whole lineage, silently logging every box (and often host Claude) out. Re-running `/login` in any one box heals them all, because the credential file is a shared mount, but the logout keeps recurring.

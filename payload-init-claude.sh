@@ -17,13 +17,16 @@ done
 
 # Workers get a private ~/.claude.json copied from the shared state, so they never
 # read another box's half-written copy (which Claude discards, losing folder trust)
-# or write their own back.
+# or write their own back. With AGENT_BOX_TRUST_PROJECT=1 the copy also trusts
+# the project folder; without a readable config it trusts nothing.
 _seed=/usr/local/share/cage/claude.json.seed
 if [ -n "${BOX_WORKER:-}" ] && [ -f "$_seed" ]; then
-  python3 - "$_seed" "${HOME}/.claude/backups" "${HOME}/.claude.json" <<'PY' || true
+  _trust_dir=""
+  [ "${AGENT_BOX_TRUST_PROJECT:-}" = 1 ] && _trust_dir="$(pwd)"
+  python3 - "$_seed" "${HOME}/.claude/backups" "${HOME}/.claude.json" "$_trust_dir" <<'PY' || true
 import glob, json, os, sys, time
 
-seed, backups, target = sys.argv[1:]
+seed, backups, target, trust_dir = sys.argv[1:]
 
 
 def load(path):
@@ -45,6 +48,8 @@ if config is None:
         config = load(path)
         if config is not None:
             break
+if config is not None and trust_dir:
+    config.setdefault("projects", {}).setdefault(trust_dir, {})["hasTrustDialogAccepted"] = True
 with open(target, "w") as f:
     json.dump(config or {}, f, indent=2)
 PY

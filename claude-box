@@ -279,9 +279,27 @@ if (mode === 'ensurehook') {
   fs.writeFileSync(dst, JSON.stringify(cur, null, 2));
   process.exit(0);
 }
+if (mode === 'trust') {
+  // AGENT_BOX_TRUST_PROJECT=1: trust the launch folder (src). An unreadable
+  // config is left alone, so the trust dialog still shows.
+  const cur = JSON.parse(fs.readFileSync(dst, 'utf8'));
+  cur.projects = cur.projects || {};
+  cur.projects[src] = { ...(cur.projects[src] || {}), hasTrustDialogAccepted: true };
+  fs.writeFileSync(dst, JSON.stringify(cur, null, 2));
+  process.exit(0);
+}
 const s = JSON.parse(fs.readFileSync(src, 'utf8'));
 if (mode === 'passthrough') {
   s.bypassPermissionsModeAccepted = true;
+  // Keep folder trust the user granted inside a box; the host file never sees it.
+  let cur = {};
+  try { cur = JSON.parse(fs.readFileSync(dst, 'utf8')); } catch {}
+  for (const [dir, project] of Object.entries(cur.projects || {})) {
+    if (project && project.hasTrustDialogAccepted) {
+      s.projects = s.projects || {};
+      s.projects[dir] = { ...(s.projects[dir] || {}), hasTrustDialogAccepted: true };
+    }
+  }
 }
 if (mode === 'settings') {
   delete s.sandbox;
@@ -320,8 +338,24 @@ JSEOF
   # deterministically rather than by model compliance.
   node "$_sync_js" ensurehook "" "$STATE_SETTINGS"
   local HOST_CLAUDE_JSON="${HOME}/.claude.json"
-  if [[ -f "$HOST_CLAUDE_JSON" ]] && { [[ ! -f "$STATE_CLAUDE_JSON" ]] || [[ "$HOST_CLAUDE_JSON" -nt "$STATE_CLAUDE_JSON" ]]; }; then
+  # Workers only read the shared copy, so they leave it alone rather than rewrite
+  # it under boxes that are using it.
+  if [[ -z "${BOX_WORKER:-}" && -f "$HOST_CLAUDE_JSON" ]] \
+     && { [[ ! -f "$STATE_CLAUDE_JSON" ]] || [[ "$HOST_CLAUDE_JSON" -nt "$STATE_CLAUDE_JSON" ]]; }; then
     node "$_sync_js" passthrough "$HOST_CLAUDE_JSON" "$STATE_CLAUDE_JSON"
+  fi
+  # Opt-in folder trust. Only the exact value 1 enables it; a worker applies it to
+  # its private copy in payload-init instead of rewriting the shared one.
+  if [[ "${AGENT_BOX_TRUST_PROJECT:-}" == 1 ]]; then
+    if [[ -n "${BOX_WORKER:-}" ]]; then
+      env_args+=(-e "AGENT_BOX_TRUST_PROJECT=1")
+    elif node "$_sync_js" trust "$PROJECT_DIR" "$STATE_CLAUDE_JSON" 2>/dev/null; then
+      log "trusting ${PROJECT_DIR} (AGENT_BOX_TRUST_PROJECT=1)"
+    else
+      warn "AGENT_BOX_TRUST_PROJECT: could not record trust for ${PROJECT_DIR}; the trust dialog will show"
+    fi
+  elif [[ -n "${AGENT_BOX_TRUST_PROJECT:-}" ]]; then
+    warn "ignoring AGENT_BOX_TRUST_PROJECT=${AGENT_BOX_TRUST_PROJECT}; set it to 1 to trust the project folder"
   fi
   rm -f "$_sync_js"
 
