@@ -517,6 +517,10 @@ self-contained subtasks and to run work in parallel.
 - \`box-worker poll <name>\` / \`box-worker list\` for status
 - \`box-worker close <name>\` shuts it down
 
+A claude worker's model and endpoint come only from \`spawn\` (\`--model\`,
+\`--base-url\`, \`--auth-token\`), never from the project's .env files. Without
+\`--base-url\` and \`--auth-token\` it runs on the Claude subscription.
+
 Names are yours ([a-z][a-z0-9_-]{0,31}) and refer only to workers you created.
 \`ask\` blocks until the worker finishes, then \`read\` its output. Spawning is slow
 (a cold cage), so reuse a worker across asks. Run \`box-worker\` with no args for
@@ -887,13 +891,25 @@ cage_run() {
   # Per-project overrides. A shared .env.agent-box applies to every box (one file
   # for keys/config common to claude/codex/pi/...); the per-label .env.<label> is
   # sourced after, so a box-specific value wins over the shared one on conflict.
-  local _ef
+  # A worker's model and endpoint come only from its spawn, so an orchestrator on
+  # a local endpoint can still open a subscription worker in the same project.
+  local _ef _v _spawn_env=()
+  local _spawn_vars=(ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN)
+  if [[ -n "${BOX_WORKER:-}" ]]; then
+    for _v in "${_spawn_vars[@]}"; do
+      [[ -n "${!_v+x}" ]] && _spawn_env+=("${_v}=${!_v}")
+    done
+  fi
   for _ef in "${PROJECT_DIR}/.env.agent-box" "${PROJECT_DIR}/.env.${BOX_LABEL}"; do
     if [[ -f "$_ef" ]]; then
       set -a; # shellcheck disable=SC1090
       source "$_ef"; set +a
     fi
   done
+  if [[ -n "${BOX_WORKER:-}" ]]; then
+    unset "${_spawn_vars[@]}"
+    for _v in "${_spawn_env[@]+"${_spawn_env[@]}"}"; do export "$_v"; done
+  fi
 
   cage_resolve_history
 

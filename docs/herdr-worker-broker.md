@@ -131,6 +131,14 @@ defaults to the same value, because a local-only endpoint has no Claude model fo
 background calls. `base_url` is the API root without `/v1`; Claude Code appends
 `/v1/messages`. The value never reaches a shell, so it cannot become a command.
 
+A worker runs its box wrapper in the orchestrator's project, so it would also source that
+project's `.env.agent-box` and `.env.<label>`. For these four variables the spawn is
+authoritative: when `BOX_WORKER` is set, libcage puts back the values the worker started
+with after the env files load, and unsets any the spawn did not pass. An orchestrator
+configured for a local endpoint in `.env.claude-box` can therefore open a worker with only
+`model` set, and that worker falls through to the subscription credential, including a
+long-lived `CLAUDE_CODE_OAUTH_TOKEN` from the same file.
+
 `spawn` also takes an optional `effort` (Claude's `--effort`: low, medium, high, xhigh,
 max), carried as `CLAUDE_BOX_EFFORT`, which `claude-box` turns into the launch flag. The
 box passes its usual level and the broker adjusts it for the model. A claude worker
