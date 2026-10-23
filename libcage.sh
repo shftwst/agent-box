@@ -610,9 +610,13 @@ cage_stage_gitconfig() {
 # tools that ignore that store at it. Node only reads extra roots from
 # NODE_EXTRA_CA_CERTS; SSL_CERT_FILE and REQUESTS_CA_BUNDLE get the full system
 # bundle, which the entrypoint has updated by the time the payload starts.
+# The relay dir is shared by every box on this state dir, so each launch writes
+# its own bundle; another launch can then never delete it from a running box.
+CAGE_CA_BUNDLE_FILE=""
 cage_stage_ca_certs() {
   [[ -n "$RELAY_DIR" ]] || return 0
-  local bundle="${RELAY_DIR}/ca-certs.pem" f n=0
+  local name="ca-certs-${CONTAINER_NAME}.pem" f n=0
+  local bundle="${RELAY_DIR}/${name}"
   rm -f "$bundle"
   for f in "${AGENT_BOX_CA_CERTS[@]+"${AGENT_BOX_CA_CERTS[@]}"}"; do
     if grep -q -- '-----BEGIN CERTIFICATE-----' "$f" 2>/dev/null; then
@@ -623,7 +627,12 @@ cage_stage_ca_certs() {
     fi
   done
   [[ $n -gt 0 ]] || return 0
-  local in_box="${BOX_STATE_MOUNT}/.cage-relay/ca-certs.pem" system=/etc/ssl/certs/ca-certificates.crt
+  if [[ ! -s "$bundle" ]]; then
+    fault ca-bundle-write-failed "could not write ${bundle}"
+    exit 1
+  fi
+  CAGE_CA_BUNDLE_FILE="$bundle"
+  local in_box="${BOX_STATE_MOUNT}/.cage-relay/${name}" system=/etc/ssl/certs/ca-certificates.crt
   env_args+=(
     -e "CAGE_CA_BUNDLE=${in_box}"
     -e "NODE_EXTRA_CA_CERTS=${in_box}"
@@ -775,6 +784,7 @@ cage_cleanup() {
     wait "$pid" 2>/dev/null || true
   done
   [[ -n "$NAME_FILE" ]] && rm -f "$NAME_FILE"
+  [[ -n "$CAGE_CA_BUNDLE_FILE" ]] && rm -f "$CAGE_CA_BUNDLE_FILE"
 }
 
 # ---------------------------------------------------------------------------

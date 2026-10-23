@@ -41,6 +41,13 @@ if [ -f "${_RELAY}/gitconfig" ]; then
   cp -f "${_RELAY}/gitconfig" "${HOME}/.gitconfig" 2>/dev/null || true
 fi
 
+# A CA bundle that never reached the box (e.g. a failed colima flush) would make
+# every Node process warn, so drop the pointers rather than export a dead path.
+if [ -n "${CAGE_CA_BUNDLE:-}" ] && [ ! -s "$CAGE_CA_BUNDLE" ]; then
+  echo "[cage] WARNING: CA bundle ${CAGE_CA_BUNDLE} is missing or empty; extra CA certs not trusted" >&2
+  unset CAGE_CA_BUNDLE NODE_EXTRA_CA_CERTS
+fi
+
 echo "[cage] starting..." >&2
 if [ "$(id -u)" = "0" ] && [ "${HOST_UID}" != "0" ]; then
   echo "[cage] creating user UID=${HOST_UID} GID=${HOST_GID}..." >&2

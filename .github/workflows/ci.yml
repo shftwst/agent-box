@@ -251,3 +251,43 @@ jobs:
           wait "$launcher" 2>/dev/null || true
           [ ! -e "$h" ] || { echo "FAIL: name-file not cleaned on exit"; exit 1; }
           echo "name handle + validation OK"
+
+      # CA bundle: NODE_EXTRA_CA_CERTS/CAGE_CA_BUNDLE point at a real bundle or are
+      # unset, so Node never warns; a later launch without certs (sharing the state
+      # dir) leaves a running box's bundle alone; the launcher removes it on exit.
+      - name: CA bundle
+        run: |
+          set -euo pipefail
+          cd /tmp/cbtest
+          box() { CLAUDE_BOX_EXEC=1 "$GITHUB_WORKSPACE/claude-box" --engine none "$@"; }
+          probe='node -e 1 2>&1; printf "%s|%s\n" "${NODE_EXTRA_CA_CERTS:-}" "${CAGE_CA_BUNDLE:-}"'
+
+          box -- bash -c "$probe" >out.txt 2>/dev/null
+          [ "$(cat out.txt)" = "|" ] || { echo "FAIL: no certs, want no CA vars and silent node:"; cat out.txt; exit 1; }
+          echo "OK: bundle absent"
+
+          printf '%s\n' 'CAGE_CA_BUNDLE=/nonexistent/ca.pem' 'NODE_EXTRA_CA_CERTS=/nonexistent/ca.pem' \
+            'CLAUDE_BOX_EXTRA_VARS=(CAGE_CA_BUNDLE NODE_EXTRA_CA_CERTS)' > .env.claude-box
+          box -- bash -c "$probe" >out.txt 2>err.txt
+          rm -f .env.claude-box
+          [ "$(cat out.txt)" = "|" ] || { echo "FAIL: dead bundle path still exported:"; cat out.txt; exit 1; }
+          grep -q 'CA bundle .* missing or empty' err.txt || { echo "FAIL: no dead-bundle warning"; cat err.txt; exit 1; }
+          echo "OK: dead bundle path dropped at start"
+
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout /dev/null -out /tmp/cbci-ca.crt \
+            -subj /CN=cbci -days 1 2>/dev/null
+          printf 'AGENT_BOX_CA_CERTS=(/tmp/cbci-ca.crt)\n' > .env.agent-box
+          name="cbci-ca-$$"
+          box --name "$name" -- sleep 120 >/dev/null 2>&1 &
+          launcher=$!
+          for _ in $(seq 1 150); do docker exec "$name" true 2>/dev/null && break; sleep 0.2; done
+          rm -f .env.agent-box
+          box -- true >/dev/null 2>&1
+          out=$(docker exec "$name" bash -c 'test -s "$NODE_EXTRA_CA_CERTS" && node -e 1 2>&1 && echo ok' || true)
+          docker stop "$name" >/dev/null
+          wait "$launcher" 2>/dev/null || true
+          [ "$out" = "ok" ] || { echo "FAIL: bundle missing or node warned after a cert-less launch:"; echo "$out"; exit 1; }
+          echo "OK: bundle present, survives a cert-less launch"
+          ! ls ~/.claude-box/state/.cage-relay/ca-certs-"$name".pem 2>/dev/null \
+            || { echo "FAIL: bundle not removed on exit"; exit 1; }
+          echo "CA bundle OK"
