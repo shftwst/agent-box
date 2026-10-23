@@ -149,11 +149,11 @@ box_stage() {
     cat "$f" >> "${STATE_DIR}/CLAUDE.md"
   done
 
-  # Concatenate AGENTS.md the same way into the cage relay (the entrypoint copies
-  # it to ~/.agents/AGENTS.md). Skip if the cage couldn't provide a writable relay.
-  if [[ -n "$RELAY_DIR" ]]; then
-    : > "${RELAY_DIR}/AGENTS.md"
-    [[ -f "${HOME}/.agents/AGENTS.md" ]] && cat "${HOME}/.agents/AGENTS.md" >> "${RELAY_DIR}/AGENTS.md"
+  # Concatenate AGENTS.md the same way into the cage relay (libcage mounts it at
+  # ~/.agents/AGENTS.md). Skip if the cage couldn't provide a writable relay.
+  if [[ -n "$RELAY_AGENTS" ]]; then
+    : > "$RELAY_AGENTS"
+    [[ -f "${HOME}/.agents/AGENTS.md" ]] && cat "${HOME}/.agents/AGENTS.md" >> "$RELAY_AGENTS"
     local agents_files=()
     current="$PROJECT_DIR"
     while [[ "$current" != "/" ]]; do
@@ -162,8 +162,8 @@ box_stage() {
     done
     for (( i=${#agents_files[@]}-1; i>=0; i-- )); do
       f="${agents_files[$i]}"
-      printf '\n<!-- %s -->\n' "$f" >> "${RELAY_DIR}/AGENTS.md"
-      cat "$f" >> "${RELAY_DIR}/AGENTS.md"
+      printf '\n<!-- %s -->\n' "$f" >> "$RELAY_AGENTS"
+      cat "$f" >> "$RELAY_AGENTS"
     done
   fi
 

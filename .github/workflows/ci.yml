@@ -291,3 +291,27 @@ jobs:
           ! ls ~/.claude-box/state/.cage-relay/ca-certs-"$name".pem 2>/dev/null \
             || { echo "FAIL: bundle not removed on exit"; exit 1; }
           echo "CA bundle OK"
+
+      # Merged AGENTS.md: a launch from another project never rewrites the
+      # ~/.agents/AGENTS.md a running box sees; the launcher removes it on exit.
+      - name: AGENTS.md per box
+        run: |
+          set -euo pipefail
+          box() { CLAUDE_BOX_EXEC=1 "$GITHUB_WORKSPACE/claude-box" --engine none "$@"; }
+          for p in alpha beta; do
+            mkdir -p "/tmp/cbagents-$p" && git -C "/tmp/cbagents-$p" init -q
+            echo "marker-$p" > "/tmp/cbagents-$p/AGENTS.md"
+          done
+          name="cbci-agents-$$"
+          (cd /tmp/cbagents-alpha && box --name "$name" -- sleep 120 >/dev/null 2>&1) &
+          launcher=$!
+          for _ in $(seq 1 150); do docker exec "$name" true 2>/dev/null && break; sleep 0.2; done
+          (cd /tmp/cbagents-beta && box -- true >/dev/null 2>&1)
+          seen=$(docker exec "$name" cat "$HOME/.agents/AGENTS.md" || true)
+          docker stop "$name" >/dev/null
+          wait "$launcher" 2>/dev/null || true
+          grep -q marker-alpha <<<"$seen" && ! grep -q marker-beta <<<"$seen" \
+            || { echo "FAIL: running box's AGENTS.md changed by another launch:"; echo "$seen"; exit 1; }
+          ! ls ~/.claude-box/state/.cage-relay/AGENTS-"$name".md 2>/dev/null \
+            || { echo "FAIL: AGENTS.md not removed on exit"; exit 1; }
+          echo "AGENTS.md per box OK"

@@ -241,9 +241,9 @@ box_stage() {
 
   # Merged AGENTS.md: global ~/.agents/AGENTS.md -> parent dirs -> project.
   # Skip if the cage couldn't provide a writable relay dir (see cage_stage_gitconfig).
-  [[ -n "$RELAY_DIR" ]] || return 0
-  : > "${RELAY_DIR}/AGENTS.md"
-  [[ -f "${HOME}/.agents/AGENTS.md" ]] && cat "${HOME}/.agents/AGENTS.md" >> "${RELAY_DIR}/AGENTS.md"
+  [[ -n "$RELAY_AGENTS" ]] || return 0
+  : > "$RELAY_AGENTS"
+  [[ -f "${HOME}/.agents/AGENTS.md" ]] && cat "${HOME}/.agents/AGENTS.md" >> "$RELAY_AGENTS"
   local agents_files=()
   local current="$PROJECT_DIR"
   while [[ "$current" != "/" ]]; do
@@ -253,12 +253,12 @@ box_stage() {
   local i f
   for (( i=${#agents_files[@]}-1; i>=0; i-- )); do
     f="${agents_files[$i]}"
-    printf '\n<!-- %s -->\n' "$f" >> "${RELAY_DIR}/AGENTS.md"
-    cat "$f" >> "${RELAY_DIR}/AGENTS.md"
+    printf '\n<!-- %s -->\n' "$f" >> "$RELAY_AGENTS"
+    cat "$f" >> "$RELAY_AGENTS"
   done
 
   # Codex reads this merged AGENTS.md; libcage injects the worker brief here.
-  BOX_BRIEF_FILE="${RELAY_DIR}/AGENTS.md"
+  BOX_BRIEF_FILE="$RELAY_AGENTS"
 }
 
 # Sync the refreshed account login back to the host so host codex and the next

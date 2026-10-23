@@ -589,8 +589,10 @@ finally:
 # ---------------------------------------------------------------------------
 # Generic relay staging: host gitconfig into the cage-owned relay dir under the
 # state volume, where entrypoint-cage.sh copies it to ~/.gitconfig. The AGENTS.md
-# merge is a payload concern (the payload writes ${RELAY_DIR}/AGENTS.md in box_stage).
+# merge is a payload concern (the payload writes ${RELAY_AGENTS} in box_stage),
+# named per launch because every box on this state dir shares the relay dir.
 RELAY_DIR=""
+RELAY_AGENTS=""
 cage_stage_gitconfig() {
   RELAY_DIR="${STATE_DIR}/.cage-relay"
   mkdir -p "$RELAY_DIR" 2>/dev/null || true
@@ -602,6 +604,7 @@ cage_stage_gitconfig() {
     RELAY_DIR=""
     return 0
   fi
+  RELAY_AGENTS="${RELAY_DIR}/AGENTS-${CONTAINER_NAME}.md"
   [[ -f "${HOME}/.gitconfig" ]] && cp -f "${HOME}/.gitconfig" "${RELAY_DIR}/gitconfig" 2>/dev/null || true
 }
 
@@ -677,7 +680,7 @@ cage_mount_link_targets() {
 # read-only, so the box sees the merge and can never overwrite the host file.
 # Workers get an empty skills dir, as with ~/.claude/skills.
 cage_mount_agents() {
-  local agents="${HOME}/.agents" merged="${RELAY_DIR:+${RELAY_DIR}/AGENTS.md}"
+  local agents="${HOME}/.agents" merged="$RELAY_AGENTS"
   if [[ -d "$agents" ]]; then
     cage_mount_once "$agents" ro
     if [[ -n "${BOX_WORKER:-}" ]]; then
@@ -785,6 +788,7 @@ cage_cleanup() {
   done
   [[ -n "$NAME_FILE" ]] && rm -f "$NAME_FILE"
   [[ -n "$CAGE_CA_BUNDLE_FILE" ]] && rm -f "$CAGE_CA_BUNDLE_FILE"
+  [[ -n "$RELAY_AGENTS" ]] && rm -f "$RELAY_AGENTS"
 }
 
 # ---------------------------------------------------------------------------
