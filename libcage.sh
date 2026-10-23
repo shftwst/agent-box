@@ -250,6 +250,24 @@ cage_resolve_history() {
   [[ -z "$MAX_SESSIONS" ]] || MAX_SESSIONS=$((10#$MAX_SESSIONS))
 }
 
+# The nested engine's anonymous volume is deleted by --rm only on a clean exit;
+# a box removed any other way leaks it. Each launch deletes labelled engine
+# volumes no container references, which never includes a running box's own.
+ENGINE_VOLUME_LABEL="agent-box.engine"
+
+engine_volume() {
+  printf -- '--mount=type=volume,dst=%s,volume-label=%s=1' "$1" "$ENGINE_VOLUME_LABEL"
+}
+
+cage_sweep_engine_volumes() {
+  local leaked
+  leaked=$(docker volume ls -q --filter "label=${ENGINE_VOLUME_LABEL}" --filter dangling=true 2>/dev/null) || return 0
+  [[ -n "$leaked" ]] || return 0
+  # shellcheck disable=SC2086
+  docker volume rm $leaked >/dev/null 2>&1 || true
+  log "removed $(printf '%s\n' "$leaked" | wc -l | tr -d ' ') leaked engine volume(s)"
+}
+
 # Resolve ENGINE from ENGINE_MODE (CLI) / ${PREFIX}_ENGINE_MODE / auto, then
 # build engine_args. Sets globals ENGINE and engine_args.
 cage_resolve_engine() {
@@ -285,7 +303,7 @@ cage_resolve_engine() {
         --security-opt seccomp=unconfined
         --security-opt systempaths=unconfined
         -e "CAGE_ENGINE=rootless"
-        -v /var/lib/claude-box-engine
+        "$(engine_volume /var/lib/claude-box-engine)"
         --init
       )
       local strat; strat="$(_resolve_userns_strategy)"
@@ -311,7 +329,7 @@ cage_resolve_engine() {
     privileged-dind)
       warn "--engine privileged-dind is ADR-0041's named weaker posture:"
       warn "a privileged cage weakens host isolation. Prefer sysbox or rootless."
-      engine_args+=(--privileged -e "CAGE_ENGINE=rootful" -v /var/lib/docker --init) ;;
+      engine_args+=(--privileged -e "CAGE_ENGINE=rootful" "$(engine_volume /var/lib/docker)" --init) ;;
     none)
       # --init here too, so all four postures agree: tini reaps zombies and
       # forwards signals uniformly even without a nested engine.
@@ -931,6 +949,7 @@ cage_run() {
   fi
 
   cage_resolve_engine
+  cage_sweep_engine_volumes
 
   # Env forwarding: generic base + the payload's extras + the wrapper's
   # ${PREFIX}_EXTRA_VARS. TERM/COLORFGBG only when set (never synthesize).
