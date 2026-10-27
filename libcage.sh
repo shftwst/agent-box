@@ -587,25 +587,45 @@ finally:
 }
 
 # ---------------------------------------------------------------------------
-# Generic relay staging: host gitconfig into the cage-owned relay dir under the
-# state volume, where entrypoint-cage.sh copies it to ~/.gitconfig. The AGENTS.md
-# merge is a payload concern (the payload writes ${RELAY_AGENTS} in box_stage),
-# named per launch because every box on this state dir shares the relay dir.
+# Generic relay staging: the cage-owned relay dir under the state volume. The
+# AGENTS.md merge is a payload concern (the payload writes ${RELAY_AGENTS} in
+# box_stage), named per launch because every box on this state dir shares it.
 RELAY_DIR=""
 RELAY_AGENTS=""
-cage_stage_gitconfig() {
+cage_stage_relay() {
   RELAY_DIR="${STATE_DIR}/.cage-relay"
   mkdir -p "$RELAY_DIR" 2>/dev/null || true
   # If a prior run left the relay dir owned by a subuid the host user can't write
   # (rootless-engine uid mapping), skip the relay rather than abort the launch.
   # entrypoint-cage.sh tolerates missing relay files; box_stage checks RELAY_DIR.
   if [[ ! -w "$RELAY_DIR" ]]; then
-    warn "relay dir not writable (${RELAY_DIR}); skipping host->box gitconfig/AGENTS.md relay"
+    warn "relay dir not writable (${RELAY_DIR}); skipping host->box AGENTS.md relay"
     RELAY_DIR=""
     return 0
   fi
   RELAY_AGENTS="${RELAY_DIR}/AGENTS-${CONTAINER_NAME}.md"
-  [[ -f "${HOME}/.gitconfig" ]] && cp -f "${HOME}/.gitconfig" "${RELAY_DIR}/gitconfig" 2>/dev/null || true
+  # Older images copied a relayed gitconfig over ~/.gitconfig, now a mount.
+  rm -f "${RELAY_DIR}/gitconfig"
+}
+
+# Host git config, read-only at its host paths: the box reads the same identity,
+# signing and global ignores as the host and cannot change them. Box-only
+# settings layer on top as GIT_CONFIG_* env.
+cage_mount_gitconfig() {
+  [[ -f "${HOME}/.gitconfig" ]] && cage_mount_once "${HOME}/.gitconfig" ro
+  [[ -d "${HOME}/.config/git" ]] && cage_mount_once "${HOME}/.config/git" ro
+  local settings=(
+    "safe.directory=*"
+    "url.https://github.com/.insteadOf=git@github.com:"
+    "credential.helper=!gh auth git-credential"
+  )
+  # Without ~/.ssh the box has no signing key, so a signed commit would fail.
+  [[ $NO_SSH -eq 0 ]] || settings+=("commit.gpgsign=false" "tag.gpgsign=false")
+  local i
+  git_env_args=(-e "GIT_CONFIG_COUNT=${#settings[@]}")
+  for i in "${!settings[@]}"; do
+    git_env_args+=(-e "GIT_CONFIG_KEY_${i}=${settings[$i]%%=*}" -e "GIT_CONFIG_VALUE_${i}=${settings[$i]#*=}")
+  done
 }
 
 # Extra CA certificates from AGENT_BOX_CA_CERTS (host PEM files): bundle them in
@@ -1015,7 +1035,8 @@ cage_run() {
   CAGE_FLUSH_PATHS=()
   cage_setup_ssh
   cage_setup_workers
-  cage_stage_gitconfig
+  cage_stage_relay
+  cage_mount_gitconfig
   cage_stage_ca_certs
 
   # Share XDG cache and ~/.local/bin across boxes (generic).
@@ -1071,13 +1092,7 @@ cage_run() {
     -e "HOST_GID=$(id -g)" \
     -e "HOME=${HOME}" \
     -e "CAGE_STATE_MOUNT=${BOX_STATE_MOUNT}" \
-    -e "GIT_CONFIG_COUNT=3" \
-    -e "GIT_CONFIG_KEY_0=safe.directory" \
-    -e "GIT_CONFIG_VALUE_0=*" \
-    -e "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf" \
-    -e "GIT_CONFIG_VALUE_1=git@github.com:" \
-    -e "GIT_CONFIG_KEY_2=credential.helper" \
-    -e "GIT_CONFIG_VALUE_2=!gh auth git-credential" \
+    "${git_env_args[@]}" \
     -v "${PROJECT_DIR}:${PROJECT_DIR}" \
     -v "${STATE_DIR}:${BOX_STATE_MOUNT}" \
     ${override_mounts[@]+"${override_mounts[@]}"} \

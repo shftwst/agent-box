@@ -34,6 +34,7 @@ The boundary is deliberately tight by default. The safety posture in one view:
 | `~/.claude` skills, plugins, hooks, `.mcp.json` | Mounted read-only, so the container reflects your local setup but cannot alter it. |
 | `~/.agents` | Mounted read-only in every box when it exists, with the folders its linked skills point to. `~/.agents/AGENTS.md` shows the global file merged with the project's `AGENTS.md` chain; the host file is never written. Workers see an empty `skills` folder. |
 | `~/.ssh` | Mounted read-only; the SSH agent is forwarded. Drop both with `--no-ssh`. |
+| `~/.gitconfig`, `~/.config/git` | Mounted read-only, so commits carry your identity and signing and the box cannot change your git config. With `--no-ssh` the box turns signing off, since it has no key. |
 | Published services | Bind host loopback (`127.0.0.1`) only, never the LAN. |
 | Nested containers | Run on an engine inside the box whose authority is bounded by the cage. No host root. |
 | Persistent state | Each box keeps its own state dir; delete it to reset that box. |
@@ -124,7 +125,7 @@ Long `docker run` options given before `--`, such as `--tmpfs /scratch` or `--en
 These box flags are consumed by the wrapper before `claude` sees them, and are position-free (they can appear anywhere on the command line):
 
 - `--upgrade`: `git pull` the install dir and exit. See [Updating](#updating).
-- `--no-ssh`: skip mounting `~/.ssh` and forwarding the SSH agent. Disables git-over-SSH and commit signing inside the container; useful for sessions that don't touch git remotes.
+- `--no-ssh`: skip mounting `~/.ssh` and forwarding the SSH agent. Disables git-over-SSH and commit signing inside the container (the box sets `commit.gpgsign` and `tag.gpgsign` to false so commits still succeed); useful for sessions that don't touch git remotes.
 - `--ollama <model>`: point Claude Code at an Ollama server instead of the Anthropic API. See [Ollama](#ollama).
 - `--engine <mode>`: nested container engine posture: `auto` (default), `sysbox`, `rootless`, `privileged-dind`, `none`. See [Nested container engine](#nested-container-engine).
 - `--name <name>`: name the box's container (default `claude-box-<project>-<pid>`), so a caller can address it with `docker stop` / `docker exec`. Must match docker's charset `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.

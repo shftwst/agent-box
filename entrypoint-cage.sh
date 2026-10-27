@@ -29,18 +29,6 @@ USERNAME="hostuser"
 # shell sources a profile), so child processes inherit PATH from this env.
 export PATH="${HOST_HOME}/.local/bin:${PATH}"
 
-# Neutral host->box file relay. The launcher stages host files under a
-# cage-owned .cage-relay/ inside the state mount (payload-independent: the name
-# is the cage's, not any harness's config file), so the relay rides the same
-# state volume the colima flush already carries. Copy them to the paths the tools
-# expect. Clean up a stale dir if Docker created one at a target. (The merged
-# AGENTS.md in the relay is bind-mounted at ~/.agents/AGENTS.md by libcage.)
-_RELAY="${CAGE_STATE_MOUNT:-${HOME}/.cage}/.cage-relay"
-if [ -f "${_RELAY}/gitconfig" ]; then
-  [ -d "${HOME}/.gitconfig" ] && rm -rf "${HOME}/.gitconfig"
-  cp -f "${_RELAY}/gitconfig" "${HOME}/.gitconfig" 2>/dev/null || true
-fi
-
 # A CA bundle that never reached the box (e.g. a failed colima flush) would make
 # every Node process warn, so drop the pointers rather than export a dead path.
 if [ -n "${CAGE_CA_BUNDLE:-}" ] && [ ! -s "$CAGE_CA_BUNDLE" ]; then

@@ -240,7 +240,7 @@ box_stage() {
   CAGE_FLUSH_PATHS+=(.credentials.json)
 
   # Merged AGENTS.md: global ~/.agents/AGENTS.md -> parent dirs -> project.
-  # Skip if the cage couldn't provide a writable relay dir (see cage_stage_gitconfig).
+  # Skip if the cage couldn't provide a writable relay dir (see cage_stage_relay).
   [[ -n "$RELAY_AGENTS" ]] || return 0
   : > "$RELAY_AGENTS"
   [[ -f "${HOME}/.agents/AGENTS.md" ]] && cat "${HOME}/.agents/AGENTS.md" >> "$RELAY_AGENTS"
